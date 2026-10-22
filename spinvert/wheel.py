@@ -5,6 +5,9 @@ Two ways in:
   the drag enters the wheel, which happens on the first mouse move.
 - click mode: opened with known files (Send to, the drop window). Click a
   segment, click the hub to switch wheels, click outside or Esc to close.
+
+It is drawn as frosted glass: what is on screen behind it shows through,
+blurred (see glass.py).
 """
 
 from __future__ import annotations
@@ -13,20 +16,24 @@ import math
 from pathlib import Path
 
 from PySide6.QtCore import QEasingCurve, QPointF, QRectF, Qt, QTimer, QVariantAnimation, Signal
-from PySide6.QtGui import QColor, QCursor, QFont, QFontMetrics, QGuiApplication, QPainter, QPainterPath
-from PySide6.QtWidgets import QWidget
+from PySide6.QtGui import (QBrush, QColor, QCursor, QFont, QFontMetrics, QGuiApplication,
+                           QLinearGradient, QPainter, QPainterPath, QPen, QRadialGradient)
+from PySide6.QtWidgets import QApplication, QWidget
 
+from spinvert import glass
 from spinvert.catalog import choices_for
-from spinvert.theme import ACCENT, SURFACE, SURFACE_HI, TEXT, TEXT_MUTED, ring_segment, thin_pen
+from spinvert.theme import ACCENT, ON_BRIGHT, ON_DARK, annulus, pill_segment, thin_pen
 from spinvert.watcher import VK, _down
 
 SIZE = 380
-R_OUT = 172
+R_OUT = 168
 R_IN = 70
 HUB = 60
-GAP = 1.4
+GAP = 6          # px between segments
+ROUND = 7        # px corner rounding of segments
 TITLES = {"convert": "Convert", "tools": "Tools"}
 KEY_NAMES = {"shift": "Shift", "ctrl": "Ctrl", "alt": "Alt"}
+CENTER = Qt.AlignmentFlag.AlignCenter
 
 
 class Wheel(QWidget):
@@ -49,9 +56,11 @@ class Wheel(QWidget):
         self.drag_mode = False
         self.dropped = False
         self.hover = None
+        self.backdrop = None
+        self.look = ON_DARK
         self.t = 1.0
         self.anim = QVariantAnimation(self)
-        self.anim.setDuration(140)
+        self.anim.setDuration(160)
         self.anim.setStartValue(0.0)
         self.anim.setEndValue(1.0)
         self.anim.setEasingCurve(QEasingCurve.Type.OutCubic)
@@ -70,6 +79,9 @@ class Wheel(QWidget):
         self._show_at(pos)
 
     def open_click(self, items: list[Path], mode: str, pos) -> None:
+        if self.isVisible():
+            self.close_wheel()
+            QApplication.processEvents()
         self.drag_mode, self.dropped, self.pending = False, False, False
         self.items, self.mode, self.hover = list(items), mode, None
         self._recompute()
@@ -98,11 +110,22 @@ class Wheel(QWidget):
         geo = screen.availableGeometry()
         x = min(max(pos.x() - SIZE // 2, geo.left()), geo.right() - SIZE)
         y = min(max(pos.y() - SIZE // 2, geo.top()), geo.bottom() - SIZE)
+        self.set_backdrop(glass.capture(x, y, SIZE, SIZE))
         self.move(x, y)
         self.t = 0.0
         self.show()
         self.raise_()
         self.anim.start()
+
+    def set_backdrop(self, image) -> None:
+        """Frost a screenshot of what is behind the wheel. None: plain dark glass."""
+        self.backdrop, self.look = None, ON_DARK
+        if image is not None:
+            try:
+                self.backdrop, brightness = glass.frost(image, SIZE)
+                self.look = ON_BRIGHT if brightness > 0.6 else ON_DARK
+            except Exception:
+                self.backdrop = None
 
     def _tick(self, value):
         self.t = float(value)
@@ -220,64 +243,122 @@ class Wheel(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         c = self._center()
-        # A nearly invisible disc so the gaps between hub and ring still catch the drop.
+        look = self.look
         p.setPen(Qt.PenStyle.NoPen)
+        # Nearly invisible, so the whole disc catches the drop, gaps included.
         p.setBrush(QColor(0, 0, 0, 2))
-        p.drawEllipse(c, R_OUT + 10, R_OUT + 10)
-        scale = 0.86 + 0.14 * self.t
+        p.drawEllipse(c, R_OUT + 12, R_OUT + 12)
+
+        p.setOpacity(self.t)
+        self._shadow(p, c, look)
+        scale = 0.9 + 0.1 * self.t
         p.translate(c)
         p.scale(scale, scale)
         p.translate(-c)
-        p.setOpacity(self.t)
-        accent = ACCENT[self.mode]
 
-        ring = QPainterPath()
-        ring.addEllipse(c, R_OUT, R_OUT)
-        p.fillPath(ring, SURFACE)
-        p.setPen(thin_pen(QColor(255, 255, 255, 30)))
-        p.drawPath(ring)
+        disc = QPainterPath()
+        disc.addEllipse(c, R_OUT, R_OUT)
+        self._glass(p, disc, c, look, zoom=1.035, tint=look.tint)
+        self._rim(p, c, R_OUT, look)
 
         n = len(self.choices)
+        accent = ACCENT[self.mode]
         if n:
             span = 360 / n
             mid = (R_IN + R_OUT) / 2
             for i, choice in enumerate(self.choices):
-                center_angle = 90 - i * span
+                angle = 90 - i * span
                 if n == 1:
-                    path = ring_segment(c, R_IN + 5, R_OUT - 5, 90, 359.9)
+                    path = annulus(c, R_IN + 6, R_OUT - 8)
                 else:
-                    path = ring_segment(c, R_IN + 5, R_OUT - 5,
-                                        center_angle - span / 2 + GAP / 2, span - GAP)
+                    path = pill_segment(c, R_IN + 6, R_OUT - 8, angle, span, GAP, ROUND)
                 hovered = i == self.hover
-                p.fillPath(path, accent if hovered else SURFACE_HI)
-                a = math.radians(center_angle) if n > 1 else math.radians(90)
-                x = c.x() + mid * math.cos(a)
-                y = c.y() - mid * math.sin(a)
-                self._label(p, choice.label, QRectF(x - 52, y - 22, 104, 44), hovered, n)
-        self._hub(p, c, accent)
+                p.setPen(thin_pen(accent if hovered else look.segment_edge, 1.6 if hovered else 1))
+                p.setBrush(look.hover if hovered else look.segment)
+                p.drawPath(path)
+                a = math.radians(angle if n > 1 else 90)
+                x, y = c.x() + mid * math.cos(a), c.y() - mid * math.sin(a)
+                self._label(p, choice.label, QRectF(x - 50, y - 22, 100, 44), hovered, n, look)
+        self._hub(p, c, accent, look)
         p.end()
 
-    def _label(self, p, text, rect, hovered, n):
+    def _shadow(self, p, c, look):
+        center = QPointF(c.x(), c.y() + 7)
+        radius = R_OUT + 16
+        grad = QRadialGradient(center, radius)
+        grad.setColorAt((R_OUT - 30) / radius, QColor(0, 0, 0, look.shadow))
+        grad.setColorAt(1.0, QColor(0, 0, 0, 0))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(grad)
+        p.drawEllipse(center, radius, radius)
+
+    def _glass(self, p, shape: QPainterPath, c, look, zoom: float, tint: QColor):
+        """Fill a shape with the frosted backdrop, magnified a little like a lens."""
+        p.save()
+        p.setClipPath(shape)
+        if self.backdrop is not None:
+            p.save()
+            p.translate(c)
+            p.scale(zoom, zoom)
+            p.translate(-c)
+            p.drawImage(QRectF(0, 0, SIZE, SIZE), self.backdrop)
+            p.restore()
+        else:
+            p.fillPath(shape, QColor(30, 30, 42, 225))
+        p.fillPath(shape, tint)
+        bounds = shape.boundingRect()
+        sheen = QLinearGradient(bounds.topLeft(), bounds.center())
+        sheen.setColorAt(0.0, QColor(255, 255, 255, look.sheen))
+        sheen.setColorAt(1.0, QColor(255, 255, 255, 0))
+        p.fillPath(shape, sheen)
+        p.restore()
+
+    def _rim(self, p, c, radius, look):
+        """Light catching the edge: bright at the top, faint at the bottom."""
+        grad = QLinearGradient(c.x(), c.y() - radius, c.x(), c.y() + radius)
+        grad.setColorAt(0.0, QColor(255, 255, 255, look.rim_top))
+        grad.setColorAt(1.0, QColor(255, 255, 255, look.rim_bottom))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(QBrush(grad), 1.3))
+        p.drawEllipse(c, radius - 0.7, radius - 0.7)
+        p.setPen(thin_pen(look.outline, 1))
+        p.drawEllipse(c, radius + 0.5, radius + 0.5)
+
+    @staticmethod
+    def _text(p, rect, text, color, shadow, flags=CENTER):
+        if shadow.alpha():
+            p.setPen(shadow)
+            p.drawText(rect.translated(0, 1), flags, text)
+        p.setPen(color)
+        p.drawText(rect, flags, text)
+
+    def _label(self, p, text, rect, hovered, n, look):
         font = QFont(self.font())
         size = 15 if n <= 7 else 13 if n <= 10 else 11
         if len(text) > 8:
             size -= 2
         font.setPixelSize(size)
-        font.setWeight(QFont.Weight.DemiBold if not hovered else QFont.Weight.Bold)
+        font.setWeight(QFont.Weight.Bold if hovered else QFont.Weight.DemiBold)
         p.setFont(font)
-        p.setPen(TEXT if hovered else QColor(244, 244, 248, 215))
-        p.drawText(rect, Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap, text)
+        color = look.hover_text if hovered else look.text
+        shadow = QColor(0, 0, 0, 0) if hovered else look.text_shadow
+        self._text(p, rect, text, color, shadow, CENTER | Qt.TextFlag.TextWordWrap)
 
-    def _hub(self, p, c, accent):
-        hub_color = QColor(36, 36, 50, 252)
+    def _hub(self, p, c, accent, look):
+        hub = QPainterPath()
+        hub.addEllipse(c, HUB, HUB)
+        tint = QColor(look.hub)
         if self.hover == "hub" and not self.drag_mode:
-            hub_color = QColor(48, 48, 66, 252)
-        p.setBrush(hub_color)
+            tint.setAlpha(min(255, tint.alpha() + 40))
+        self._glass(p, hub, c, look, zoom=1.12, tint=tint)
+        p.setBrush(Qt.BrushStyle.NoBrush)
         edge = QColor(accent)
-        edge.setAlpha(200)
+        edge.setAlpha(235)
         p.setPen(thin_pen(edge, 2))
         p.drawEllipse(c, HUB, HUB)
+        self._rim(p, c, HUB - 2, look)
 
         title = TITLES[self.mode]
         if self.pending:
@@ -298,20 +379,23 @@ class Wheel(QWidget):
             hint = f"Click: {TITLES[other]}"
 
         font = QFont(self.font())
-        font.setPixelSize(16)
+        font.setPixelSize(17)
         font.setWeight(QFont.Weight.Bold)
         p.setFont(font)
-        p.setPen(TEXT)
-        p.drawText(QRectF(c.x() - HUB, c.y() - 30, 2 * HUB, 22), Qt.AlignmentFlag.AlignCenter, title)
+        self._text(p, QRectF(c.x() - HUB, c.y() - 33, 2 * HUB, 24), title, look.text, look.text_shadow)
 
         font.setPixelSize(11)
-        font.setWeight(QFont.Weight.Normal)
+        font.setWeight(QFont.Weight.Medium)
         p.setFont(font)
-        p.setPen(TEXT_MUTED)
-        sub = QFontMetrics(font).elidedText(sub, Qt.TextElideMode.ElideMiddle, int(2 * HUB - 18))
-        p.drawText(QRectF(c.x() - HUB, c.y() - 7, 2 * HUB, 16), Qt.AlignmentFlag.AlignCenter, sub)
+        sub = QFontMetrics(font).elidedText(sub, Qt.TextElideMode.ElideMiddle, int(2 * HUB - 20))
+        self._text(p, QRectF(c.x() - HUB, c.y() - 9, 2 * HUB, 16), sub, look.muted, QColor(0, 0, 0, 0))
 
         font.setPixelSize(10)
+        font.setWeight(QFont.Weight.DemiBold)
         p.setFont(font)
-        p.setPen(accent.lighter(130))
-        p.drawText(QRectF(c.x() - HUB, c.y() + 12, 2 * HUB, 16), Qt.AlignmentFlag.AlignCenter, hint)
+        pill_w = QFontMetrics(font).horizontalAdvance(hint) + 16
+        pill = QRectF(c.x() - pill_w / 2, c.y() + 12, pill_w, 18)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(look.pill)
+        p.drawRoundedRect(pill, 9, 9)
+        self._text(p, pill, hint, look.text, QColor(0, 0, 0, 0))
