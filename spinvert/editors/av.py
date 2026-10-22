@@ -1,184 +1,399 @@
-"""Video and audio editors: trim, crop (Reels, square...), speed, frames, split,
+"""Video and audio editors: trim and edit (text, pictures and sound on the
+video, save speed), crop or fit for Reels and more, speed, frames, split,
 redact, normalize, visualizer, channels and bleep.
 
-Video editors show the frame under the playhead and a strip of thumbnails;
-audio editors show the waveform and can play the selection.
+Every editor with a video or a recording plays it with sound: Play/Pause,
+10 seconds back and forward, preview speed; Space plays or pauses and the
+arrow keys jump 10 seconds.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from PIL import Image
-from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QCheckBox, QDoubleSpinBox, QFileDialog, QHBoxLayout, QPushButton, QSpinBox
+from PIL import Image, ImageOps
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QImage
+from PySide6.QtWidgets import (QCheckBox, QDoubleSpinBox, QFileDialog, QHBoxLayout, QListWidget, QPushButton,
+                               QSpinBox, QVBoxLayout, QWidget)
 
+from spinvert import layers as L
+from spinvert.editors.annotate import LayerCanvas, LayerList, Properties, side_panel
 from spinvert.editors.base import (Background, BoxesTool, CropTool, GlassDialog, ImageCanvas, Segmented,
-                                   SliderRow, TimeEdit, Timeline, busy, fmt_time, label,
-                                   play_wav, qimage_from_png, stop_sound, to_qimage)
+                                   SliderRow, TimeEdit, Timeline, busy, fmt_time, label, play_wav,
+                                   qimage_from_png, stop_sound, to_qimage)
 from spinvert.editors.pickers import Swatches
-from spinvert.engines import media
+from spinvert.editors.player import Player, TransportBar
+from spinvert.engines import imaging, media
 from spinvert.settings import Settings
+
+SPEEDS = [("0.25", "0.25×"), ("0.5", "0.5×"), ("0.75", "0.75×"), ("1", "Normal"), ("1.5", "1.5×"), ("2", "2×"),
+          ("3", "3×"), ("4", "4×")]
 
 
 def _custom() -> str:
     return Settings.load().ffmpeg_path
 
 
-class MediaDialog(GlassDialog):
-    """Loads the file's facts, a frame preview (video) and the strip or waveform."""
+def _buttons(*pairs) -> QHBoxLayout:
+    row = QHBoxLayout()
+    for text, fn in pairs:
+        b = QPushButton(text)
+        b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        b.clicked.connect(fn)
+        row.addWidget(b)
+    return row
 
-    def __init__(self, title: str, path: Path, mode: str = "range", size=(1060, 760),
-                 primary: str = "Save copy", show_frame: bool = True):
+
+def _panel(*items) -> QWidget:
+    """A column of widgets and layouts, for the side panel."""
+    box = QWidget()
+    lay = QVBoxLayout(box)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(8)
+    for item in items:
+        if isinstance(item, QWidget):
+            lay.addWidget(item)
+        else:
+            lay.addLayout(item)
+    lay.addStretch()
+    return box
+
+
+class MediaDialog(GlassDialog):
+    """Plays the file with sound and keeps the timeline in step with it."""
+
+    def __init__(self, title: str, path: Path, mode: str = "range", size=(1180, 820),
+                 primary: str = "Save copy", start_at: float | None = None):
         super().__init__(title, size, primary)
+        from PySide6.QtMultimedia import QMediaPlayer
+
         self.path = path
         self.custom = _custom()
         self.info = busy(lambda: media.info(path, self.custom))
         self.duration = self.info["duration"] or 0.1
         self.video = bool(self.info["video"])
-        self.canvas = ImageCanvas((480, 270)) if self.video and show_frame else None
+        self.screen = None
+        self.effect = None
+        self.last_frame = QImage()
         self.timeline = Timeline(self.duration, mode)
-        self.timeline.setMinimumHeight(96 if self.video else 130)
+        self.timeline.setMinimumHeight(90 if self.video else 150)
         self._strip = Background()
         self._strip.done.connect(lambda data, err: data and self.timeline.set_background(qimage_from_png(data)))
         if self.video:
             self._strip.start(lambda: media.strip_png(path, self.duration, 14, 64, self.custom))
         else:
             self._strip.start(lambda: media.waveform_png(path, 1600, 200, "#FFFFFF", self.custom))
-        self._frames = Background()
-        self._frames.done.connect(self._frame_ready)
-        self._want, self._loading = None, False
-        self._frame_soon = QTimer(self)
-        self._frame_soon.setSingleShot(True)
-        self._frame_soon.setInterval(110)
-        self._frame_soon.timeout.connect(self._load_frame)
-        self.timeline.scrubbed.connect(lambda t: self._frame_soon.start())
-        if self.canvas is not None:
-            self._want = self.duration / 2 if mode != "range" else 0.0
-            self.timeline.playhead = self._want
-            self._load_frame()
+        self.player = Player(path, video=self.video, parent=self)
+        self.player.frame.connect(self._frame)
+        self.player.position.connect(self._position)
+        self.timeline.scrubbed.connect(self.player.seek)
+        self.transport = TransportBar(self.player, self.duration, self)
+        self._start_at = start_at if start_at is not None else (0.0 if mode == "range" else self.duration / 2)
+        self.timeline.playhead = self._start_at
+        self.player.player.mediaStatusChanged.connect(
+            lambda s: s == QMediaPlayer.MediaStatus.LoadedMedia and self._loaded())
 
-    def _load_frame(self):
-        if self.canvas is None:
-            return
-        t = self.timeline.playhead
-        if self._loading:
-            self._want = t
-            return
-        self._loading, self._want = True, None
-        self._frames.start(lambda: media.frame_png(self.path, min(t, self.duration - 0.05), 960, self.custom))
+    def _loaded(self):
+        self.player.seek(self._start_at)
+        self.player.pause()  # shows the frame without playing
 
-    def _frame_ready(self, data, error):
-        self._loading = False
-        if data:
-            self.canvas.set_image(qimage_from_png(data))
-        if self._want is not None:
-            self._load_frame()
+    def _frame(self, img: QImage):
+        if img.width() > 1280:
+            img = img.scaledToWidth(1280, Qt.TransformationMode.SmoothTransformation)
+        self.last_frame = img
+        self.show_frame(img)
+
+    def show_frame(self, img: QImage):
+        if self.screen is not None:
+            self.screen.set_image(self.effect(img) if self.effect else img)
+
+    def refresh_frame(self):
+        if not self.last_frame.isNull():
+            self.show_frame(self.last_frame)
+
+    def _position(self, t: float):
+        if self.timeline._drag is None:
+            self.timeline.playhead = t
+            self.timeline.update()
+        self.on_time(t)
+
+    def on_time(self, t: float):
+        pass
+
+    def now(self) -> float:
+        return self.timeline.playhead
 
     def step_frame(self, direction: int):
-        fps = self.info["fps"] or 25
-        self.timeline.playhead = min(self.duration, max(0.0, self.timeline.playhead + direction / fps))
-        self.timeline.update()
-        self.timeline.scrubbed.emit(self.timeline.playhead)
+        self.player.pause()
+        self.player.seek(self.now() + direction / (self.info["fps"] or 25))
 
-    def play(self, start: float, end: float, af: str = "", graph=None):
+    def play_preview(self, start: float, end: float, af: str = "", graph=None):
+        """A filtered preview (e.g. bleeped) through Windows' sound player."""
+        self.player.pause()
         try:
             play_wav(busy(lambda: media.preview_wav(self.path, start, end, af, graph, self.custom)))
         except Exception as e:  # a preview is a convenience; say why it didn't play
-            self.set_status(f"Couldn't play the preview: {e}")
+            if hasattr(self, "status"):
+                self.status.setText(f"Couldn't play the preview: {e}")
 
-    def set_status(self, text: str):
-        if hasattr(self, "status"):
-            self.status.setText(text)
+    def done(self, result):
+        self.player.close()
+        stop_sound()
+        super().done(result)
 
 
-def _buttons(*pairs) -> QHBoxLayout:
+def _range_row(dialog, timeline: Timeline, with_frames: bool):
+    """Start and end fields, the kept length and 'here' buttons for a range timeline."""
+    dialog.start_edit, dialog.end_edit = TimeEdit(0), TimeEdit(dialog.duration)
+    dialog.length = label("", bold=True)
+
+    def set_range(start, end):
+        if start is not None:
+            timeline.start = min(max(0.0, start), timeline.end - 0.05)
+        if end is not None:
+            timeline.end = max(min(dialog.duration, end), timeline.start + 0.05)
+        timeline.update()
+        sync()
+
+    def sync():
+        dialog.start_edit.set(timeline.start)
+        dialog.end_edit.set(timeline.end)
+        dialog.length.setText(f"Keeps {fmt_time(timeline.end - timeline.start)}")
+
+    dialog.start_edit.changed.connect(lambda v: set_range(v, None))
+    dialog.end_edit.changed.connect(lambda v: set_range(None, v))
+    timeline.changed.connect(sync)
     row = QHBoxLayout()
-    for text, fn in pairs:
-        b = QPushButton(text)
-        b.clicked.connect(fn)
-        row.addWidget(b)
+    row.addWidget(label("Start"))
+    row.addWidget(dialog.start_edit)
+    row.addWidget(label("End"))
+    row.addWidget(dialog.end_edit)
+    row.addWidget(dialog.length)
+    row.addStretch()
+    if with_frames:
+        row.addLayout(_buttons(("◀ Frame", lambda: dialog.step_frame(-1)), ("Frame ▶", lambda: dialog.step_frame(1))))
+    row.addLayout(_buttons(("Start here", lambda: set_range(dialog.now(), None)),
+                           ("End here", lambda: set_range(None, dialog.now())),
+                           ("▶ Selection", lambda: dialog.player.play_range(timeline.start, timeline.end))))
+    sync()
+    dialog.set_range = set_range
     return row
 
 
-# ------------------------------------------------------------------ trim
+def _save_options(dialog, has_audio: bool) -> QWidget:
+    dialog.speed = Segmented(SPEEDS, "1", wrap=4)
+    dialog.keep_pitch = QCheckBox("Keep the voice's pitch")
+    dialog.keep_pitch.setChecked(True)
+    dialog.fade_in = SliderRow("Fade in", 0, 100, 0, " s", scale=10, width=64)
+    dialog.fade_out = SliderRow("Fade out", 0, 100, 0, " s", scale=10, width=64)
+    items = [label("Save at speed", bold=True), dialog.speed]
+    if has_audio:
+        items += [dialog.keep_pitch, dialog.fade_in, dialog.fade_out]
+    return _panel(*items)
 
-class TrimDialog(MediaDialog):
+
+# ------------------------------------------------------------- trim & edit
+
+class VideoEditDialog(MediaDialog):
+    """Trim, and put text, pictures and sound on the video."""
+
     def __init__(self, path):
-        super().__init__("Trim", path, "range", primary="Trim")
-        tl = self.timeline
-        if self.canvas is not None:
-            self.body.addWidget(self.canvas, 1)
-        self.body.addWidget(tl)
-        self.start_edit, self.end_edit = TimeEdit(0), TimeEdit(self.duration)
-        self.length = label("", bold=True)
-        self.start_edit.changed.connect(lambda v: self._set(v, None))
-        self.end_edit.changed.connect(lambda v: self._set(None, v))
+        super().__init__("Trim & edit video", path, "range", (1340, 900), "Save video", start_at=0.0)
+        w, h = self.info["width"] or 16, self.info["height"] or 9
+        blank = QImage(w, h, QImage.Format.Format_ARGB32)
+        blank.fill(QColor("black"))
+        self.canvas = LayerCanvas(blank)
+        self.canvas.time = 0.0
+        self.canvas.edited.connect(self._stamp_layers)
+        self.canvas.selection.connect(self._layer_picked)
+        self.layer_list = LayerList(self.canvas)
+        self.props = Properties(self.canvas)
+        self.tools = Segmented([("select", "↖ Select"), ("text", "+ Text")], "select")
+        self.tools.changed.connect(self._tool)
+        # the selected layer's time range
+        self.layer_from, self.layer_to = TimeEdit(0), TimeEdit(self.duration)
+        self.layer_from.changed.connect(lambda v: self._layer_time(v, None))
+        self.layer_to.changed.connect(lambda v: self._layer_time(None, v))
+        self.layer_time = _panel(label("Selected layer shows", bold=True),
+                                 self._row(label("from"), self.layer_from, label("to"), self.layer_to),
+                                 _buttons(("From here", lambda: self._layer_time(self.now(), None)),
+                                          ("Until here", lambda: self._layer_time(None, self.now())),
+                                          ("Whole video", lambda: self._layer_time(0.0, self.duration))))
+        self.layer_time.setVisible(False)
+        # sound tracks
+        self.tracks = []
+        self.track_list = QListWidget()
+        self.track_list.setFixedHeight(90)
+        self.track_list.currentRowChanged.connect(self._track_picked)
+        self.track_at = TimeEdit(0)
+        self.track_at.changed.connect(lambda v: self._track_set("at", v))
+        self.track_volume = SliderRow("Volume", 0, 200, 100, "%", width=60)
+        self.track_volume.changed.connect(lambda v: self._track_set("volume", v))
+        self.mute = QCheckBox("Mute the video's own sound")
+        sound = _panel(label("Sound", bold=True),
+                       _buttons(("+ Add sound…", self._add_track), ("Remove", self._remove_track)),
+                       self.track_list, self._row(label("Starts at"), self.track_at,
+                                                  _buttons(("Here", lambda: self._track_set("at", self.now())))),
+                       self.track_volume, self.mute)
+        right = _panel(_save_options(self, True), self.layer_time, self.props, sound)
+        # layout
+        middle = QHBoxLayout()
+        left = QVBoxLayout()
+        left.addWidget(self.canvas, 1)
+        left.addWidget(self.transport)
+        left.addWidget(self.timeline)
+        left.addLayout(_range_row(self, self.timeline, True))
+        layers_row = QHBoxLayout()
+        layers_row.addWidget(self.tools)
+        layers_row.addLayout(_buttons(("+ Picture…", self._picture)))
+        layers_row.addWidget(self.layer_list, 1)
+        layers_row.addLayout(_buttons(("Delete", self.canvas.delete)))
+        left.addLayout(layers_row)
+        middle.addLayout(left, 1)
+        middle.addWidget(side_panel(right, 340))
+        self.body.addLayout(middle, 1)
+        self.footer_left.addWidget(label("Space plays or pauses, ← → jump 10 s. Text and pictures can be "
+                                         "dragged on the video.", muted=True))
+
+    @staticmethod
+    def _row(*items) -> QHBoxLayout:
         row = QHBoxLayout()
-        row.addWidget(label("Start"))
-        row.addWidget(self.start_edit)
-        row.addWidget(label("End"))
-        row.addWidget(self.end_edit)
-        row.addWidget(self.length)
+        for item in items:
+            if isinstance(item, QWidget):
+                row.addWidget(item)
+            else:
+                row.addLayout(item)
         row.addStretch()
-        if self.video:
-            row.addLayout(_buttons(("◀ Frame", lambda: self.step_frame(-1)), ("Frame ▶", lambda: self.step_frame(1))))
-        row.addLayout(_buttons(("Start here", lambda: self._set(tl.playhead, None)),
-                               ("End here", lambda: self._set(None, tl.playhead))))
-        self.body.addLayout(row)
-        opts = QHBoxLayout()
-        self.fade_in = SliderRow("Fade in", 0, 100, 0, " s", scale=10, width=60)
-        self.fade_out = SliderRow("Fade out", 0, 100, 0, " s", scale=10, width=60)
-        opts.addWidget(self.fade_in, 1)
-        opts.addWidget(self.fade_out, 1)
-        if self.video:
-            self.fast = QCheckBox("Fast: no re-encoding (cuts at the nearest keyframe)")
-            opts.addWidget(self.fast)
-        else:
-            self.fast = None
-            opts.addLayout(_buttons(("Remove silence at the ends", self._silence),
-                                    ("▶ Play selection", lambda: self.play(tl.start, tl.end)), ("■ Stop", stop_sound)))
-        self.body.addLayout(opts)
-        self.status = label("Drag the white handles, or type exact times.", muted=True)
-        self.body.addWidget(self.status)
-        tl.changed.connect(self._sync)
-        self._sync()
+        return row
 
-    def _set(self, start, end):
-        tl = self.timeline
+    def show_frame(self, img: QImage):
+        self.canvas.image = img
+        self.canvas.update()
+
+    def on_time(self, t: float):
+        self.canvas.time = t
+        self.canvas.update()
+
+    def _tool(self, key):
+        self.canvas.finish_text()
+        self.canvas.tool = key
+        if key != "select":
+            self.canvas.select(None)
+        self.props.load()
+
+    def _stamp_layers(self):
+        for layer in self.canvas.layers:  # new layers show for the whole video until changed
+            layer.setdefault("start", 0.0)
+            layer.setdefault("end", self.duration)
+
+    def _layer_picked(self, layer):
+        self.layer_time.setVisible(layer is not None)
+        if layer is not None:
+            self._stamp_layers()
+            self.layer_from.set(layer["start"])
+            self.layer_to.set(layer["end"])
+
+    def _layer_time(self, start, end):
+        layer = self.canvas.current
+        if layer is None:
+            return
+        self._stamp_layers()
         if start is not None:
-            tl.start = min(max(0.0, start), tl.end - 0.05)
-            tl.playhead = tl.start
+            layer["start"] = max(0.0, min(start, layer["end"] - 0.05))
         if end is not None:
-            tl.end = max(min(self.duration, end), tl.start + 0.05)
-            tl.playhead = tl.end
-        tl.update()
-        tl.scrubbed.emit(tl.playhead)
-        self._sync()
+            layer["end"] = min(self.duration, max(end, layer["start"] + 0.05))
+        self._layer_picked(layer)
+        self.canvas.commit()
 
-    def _sync(self):
+    def _picture(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Add a picture", "",
+                                              "Images (*.png *.jpg *.jpeg *.webp *.heic *.bmp *.gif *.svg)")
+        if path:
+            img = L._image(path)
+            aspect = img.width() / img.height() if not img.isNull() and img.height() else 1.0
+            self.canvas.add(L.new("image", path=path, points=[[0.6, 0.6]], w=0.3, aspect=aspect,
+                                  start=0.0, end=self.duration))
+
+    def _add_track(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Add sound", "",
+                                              "Sound (*.mp3 *.m4a *.wav *.flac *.ogg *.opus *.aac *.wma *.aiff "
+                                              "*.mp4 *.mov *.mkv)")
+        if path:
+            self.tracks.append({"path": path, "at": self.now(), "volume": 100})
+            self._show_tracks(len(self.tracks) - 1)
+
+    def _remove_track(self):
+        row = self.track_list.currentRow()
+        if 0 <= row < len(self.tracks):
+            self.tracks.pop(row)
+            self._show_tracks(min(row, len(self.tracks) - 1))
+
+    def _show_tracks(self, select: int):
+        self.track_list.blockSignals(True)
+        self.track_list.clear()
+        for t in self.tracks:
+            self.track_list.addItem(f"♪ {Path(t['path']).name}  from {fmt_time(t['at'])}  {t['volume']}%")
+        self.track_list.blockSignals(False)
+        if 0 <= select < len(self.tracks):
+            self.track_list.setCurrentRow(select)
+
+    def _track_picked(self, row):
+        if 0 <= row < len(self.tracks):
+            self.track_at.set(self.tracks[row]["at"])
+            self.track_volume.set(self.tracks[row]["volume"], quiet=True)
+
+    def _track_set(self, key, value):
+        row = self.track_list.currentRow()
+        if 0 <= row < len(self.tracks):
+            self.tracks[row][key] = value
+            self._show_tracks(row)
+
+    def accept(self):
+        self.canvas.finish_text()
+        super().accept()
+
+    def params(self) -> dict:
+        self._stamp_layers()
         tl = self.timeline
-        self.start_edit.set(tl.start)
-        self.end_edit.set(tl.end)
-        self.length.setText(f"Keeps {fmt_time(tl.end - tl.start)}")
+        return {"start": tl.start, "end": tl.end, "speed": float(self.speed.get() or 1),
+                "keep_pitch": self.keep_pitch.isChecked(), "fade_in": self.fade_in.get() / 10,
+                "fade_out": self.fade_out.get() / 10, "layers": [dict(x) for x in self.canvas.layers],
+                "tracks": [dict(t) for t in self.tracks], "mute_original": self.mute.isChecked()}
+
+
+class AudioTrimDialog(MediaDialog):
+    def __init__(self, path):
+        super().__init__("Trim audio", path, "range", (1120, 700), "Trim", start_at=0.0)
+        self.body.addWidget(self.transport)
+        self.body.addWidget(self.timeline, 1)
+        self.body.addLayout(_range_row(self, self.timeline, False))
+        options = QHBoxLayout()
+        options.addWidget(_save_options(self, True), 1)
+        options.addLayout(_buttons(("Remove silence at the ends", self._silence)))
+        self.body.addLayout(options)
+        self.status = label("Drag the white handles or type exact times. Space plays, ← → jump 10 s.", muted=True)
+        self.body.addWidget(self.status)
 
     def _silence(self):
         start, end = busy(lambda: media.silence_edges(self.path, self.custom))
-        self._set(start, end)
+        self.set_range(start, end)
         self.status.setText("Silence at the start and end is now outside the selection.")
 
     def params(self) -> dict:
         tl = self.timeline
-        return {"start": tl.start, "end": tl.end, "fade_in": self.fade_in.get() / 10,
-                "fade_out": self.fade_out.get() / 10, "fast": bool(self.fast and self.fast.isChecked())}
+        return {"start": tl.start, "end": tl.end, "speed": float(self.speed.get() or 1),
+                "keep_pitch": self.keep_pitch.isChecked(), "fade_in": self.fade_in.get() / 10,
+                "fade_out": self.fade_out.get() / 10}
 
 
 def trim(paths, parent=None):
-    d = TrimDialog(paths[0])
+    info = busy(lambda: media.info(paths[0], _custom()))
+    d = VideoEditDialog(paths[0]) if info["video"] else AudioTrimDialog(paths[0])
     return d.params() if d.run() else None
 
 
-# ------------------------------------------------------------------ crop
+# ------------------------------------------------------------- crop / fit
 
 PRESETS = [("9:16", "Reels / TikTok 9:16", (1080, 1920)), ("1:1", "Square 1:1", (1080, 1080)),
            ("4:5", "Portrait 4:5", (1080, 1350)), ("16:9", "Landscape 16:9", (1920, 1080)),
@@ -187,48 +402,120 @@ PRESETS = [("9:16", "Reels / TikTok 9:16", (1080, 1920)), ("1:1", "Square 1:1", 
 
 class VideoCropDialog(MediaDialog):
     def __init__(self, path):
-        super().__init__("Crop video", path, "point", primary="Crop")
+        super().__init__("Crop video", path, "point", (1240, 860), "Save video")
+        self.screen = ImageCanvas((480, 300))
         self.tool = CropTool()
-        self.canvas.set_tool(self.tool)
-        self.body.addWidget(self.canvas, 1)
-        self.body.addWidget(self.timeline)
+        self.screen.set_tool(self.tool)
+        self.background = {"kind": "blur", "blur": 40}
         self.presets = Segmented([(k, text) for k, text, _ in PRESETS], "9:16")
         self.presets.changed.connect(self._preset)
-        self.body.addWidget(self.presets)
-        row = QHBoxLayout()
+        self.mode = Segmented([("fill", "Crop to fill"), ("fit", "Fit, with a background")], "fill")
+        self.mode.changed.connect(self._mode)
         self.exact = QCheckBox("Output size")
         self.exact.setChecked(True)
         self.out_w, self.out_h = QSpinBox(), QSpinBox()
         for box in (self.out_w, self.out_h):
             box.setRange(16, 8192)
-        row.addWidget(self.exact)
-        row.addWidget(self.out_w)
-        row.addWidget(label("×"))
-        row.addWidget(self.out_h)
-        row.addStretch()
-        row.addWidget(label(f"Original {self.info['width']} × {self.info['height']}. The audio is kept.",
-                            muted=True))
-        self.body.addLayout(row)
-        QTimer.singleShot(400, lambda: self._preset("9:16"))
+            box.valueChanged.connect(lambda *_: self.refresh_frame())
+        grads = Swatches([(n, c) for n, c in imaging.GRADIENTS.items()], None, size=28, wrap=6, gradient=True)
+        solids = Swatches([(c, c) for c in imaging.SOLIDS], None, size=28, wrap=6)
+        grads.changed.connect(lambda k: (solids.clear(), self._set_bg(_gradient_key(k))))
+        solids.changed.connect(lambda c: (grads.clear(), self._set_bg({"kind": "solid", "color": c})))
+        self.blur = SliderRow("Blur", 0, 100, 40, width=50)
+        self.blur.changed.connect(lambda v: (self.background.__setitem__("blur", v), self.refresh_frame()))
+        self.bg_panel = _panel(label("Background", bold=True),
+                               _buttons(("Blurred video", lambda: (grads.clear(), solids.clear(),
+                                                                    self._set_bg({"kind": "blur",
+                                                                                  "blur": self.blur.get()}))),
+                                        ("Image…", lambda: self._pick(grads, solids))),
+                               self.blur, label("Gradients"), grads, label("Colours"), solids)
+        self.bg_panel.setVisible(False)
+        size_row = QHBoxLayout()
+        size_row.addWidget(self.exact)
+        size_row.addWidget(self.out_w)
+        size_row.addWidget(label("×"))
+        size_row.addWidget(self.out_h)
+        size_row.addStretch()
+        left = QVBoxLayout()
+        left.addWidget(self.screen, 1)
+        left.addWidget(self.transport)
+        left.addWidget(self.timeline)
+        left.addWidget(self.presets)
+        left.addWidget(self.mode)
+        left.addLayout(size_row)
+        main = QHBoxLayout()
+        main.addLayout(left, 1)
+        main.addWidget(side_panel(self.bg_panel, 330))
+        self.body.addLayout(main, 1)
+        self.footer_left.addWidget(label(f"Original {self.info['width']} × {self.info['height']}. "
+                                         "The sound is kept.", muted=True))
+        self._preset("9:16")
+
+    def _out_size(self):
+        return self.out_w.value(), self.out_h.value()
+
+    def show_frame(self, img: QImage):
+        first = self.screen.image.isNull()
+        super().show_frame(img)
+        if first and self.mode.get() == "fill":  # the crop box needs the real picture shape
+            self._preset(self.presets.get())
 
     def _preset(self, key):
         for k, _, size in PRESETS:
             if k == key:
                 if size:
-                    w, h = size
-                    self.tool.set_aspect(w / h)
-                    self.out_w.setValue(w)
-                    self.out_h.setValue(h)
+                    self.out_w.setValue(size[0])
+                    self.out_h.setValue(size[1])
+                    self.exact.setChecked(True)
+                    self.tool.set_aspect(size[0] / size[1])
                 else:
                     self.tool.set_aspect(None)
                     self.exact.setChecked(False)
-        self.canvas.update()
+        self.screen.update()
+        self.refresh_frame()
+
+    def _mode(self, key):
+        fit = key == "fit"
+        self.bg_panel.setVisible(fit)
+        self.screen.set_tool(None if fit else self.tool)
+        self.effect = self._fit_preview if fit else None
+        self.refresh_frame()
+
+    def _set_bg(self, bg):
+        self.background = bg
+        self.refresh_frame()
+
+    def _pick(self, grads, solids):
+        path, _ = QFileDialog.getOpenFileName(self, "Background image", "",
+                                              "Images (*.jpg *.jpeg *.png *.webp *.heic *.bmp)")
+        if path:
+            grads.clear()
+            solids.clear()
+            self._set_bg({"kind": "image", "path": path})
+
+    def _fit_preview(self, img: QImage) -> QImage:
+        W, H = self._out_size()
+        k = 720 / max(W, H)
+        pw, ph = max(2, round(W * k)), max(2, round(H * k))
+        frame = L.to_pil(img).convert("RGB")
+        canvas = imaging._background(self.background, (pw, ph), frame, max(pw, ph) / 1000)
+        fg = ImageOps.contain(frame, (pw, ph), Image.Resampling.LANCZOS)
+        canvas.paste(fg, ((pw - fg.width) // 2, (ph - fg.height) // 2))
+        return to_qimage(canvas)
 
     def params(self) -> dict:
-        p = {"rect": list(self.tool.rect)}
+        if self.mode.get() == "fit":
+            return {"mode": "fit", "size": list(self._out_size()), "background": dict(self.background)}
+        p = {"mode": "fill", "rect": list(self.tool.rect)}
         if self.exact.isChecked():
-            p["size"] = [self.out_w.value(), self.out_h.value()]
+            p["size"] = list(self._out_size())
         return p
+
+
+def _gradient_key(key: str) -> dict:
+    from spinvert.editors.photo import background_from_key
+
+    return background_from_key(key)
 
 
 def crop_video(paths, parent=None):
@@ -283,9 +570,10 @@ def speed(paths, parent=None):
 class FramesDialog(MediaDialog):
     def __init__(self, path):
         super().__init__("Save frames", path, "points", primary="Save frames")
-        tl = self.timeline
-        self.body.addWidget(self.canvas, 1)
-        self.body.addWidget(tl)
+        self.screen = ImageCanvas((480, 270))
+        self.body.addWidget(self.screen, 1)
+        self.body.addWidget(self.transport)
+        self.body.addWidget(self.timeline)
         self.mode = Segmented([("pick", "Pick frames"), ("every", "One every…")], "pick")
         self.every = QDoubleSpinBox()
         self.every.setRange(0.1, 3600)
@@ -298,11 +586,11 @@ class FramesDialog(MediaDialog):
         row.addLayout(_buttons(("◀ Frame", lambda: self.step_frame(-1)), ("Frame ▶", lambda: self.step_frame(1)),
                                ("+ Add this frame", self._add), ("Clear", self._clear)))
         self.body.addLayout(row)
-        self.list = label("No frames picked yet. Move to a frame and press Add.", muted=True)
+        self.list = label("No frames picked yet. Pause on a frame and press Add.", muted=True)
         self.body.addWidget(self.list)
 
     def _add(self):
-        t = round(self.timeline.playhead, 3)
+        t = round(self.now(), 3)
         if t not in self.timeline.points:
             self.timeline.points.append(t)
             self.timeline.points.sort()
@@ -318,7 +606,7 @@ class FramesDialog(MediaDialog):
     def params(self) -> dict:
         if self.mode.get() == "every":
             return {"every": self.every.value()}
-        return {"times": self.timeline.points or [self.timeline.playhead]}
+        return {"times": self.timeline.points or [self.now()]}
 
 
 def frames(paths, parent=None):
@@ -331,10 +619,11 @@ def frames(paths, parent=None):
 class SplitDialog(MediaDialog):
     def __init__(self, path):
         super().__init__("Split", path, "points", primary="Split")
-        tl = self.timeline
-        if self.canvas is not None:
-            self.body.addWidget(self.canvas, 1)
-        self.body.addWidget(tl)
+        if self.video:
+            self.screen = ImageCanvas((480, 270))
+            self.body.addWidget(self.screen, 1)
+        self.body.addWidget(self.transport)
+        self.body.addWidget(self.timeline, 0 if self.video else 1)
         self.mode = Segmented([("parts", "Equal parts"), ("every", "Every…"), ("points", "At my points")], "parts")
         self.parts = QSpinBox()
         self.parts.setRange(2, 100)
@@ -363,7 +652,7 @@ class SplitDialog(MediaDialog):
         self._update()
 
     def _add(self):
-        t = round(self.timeline.playhead, 3)
+        t = round(self.now(), 3)
         if 0 < t < self.duration and t not in self.timeline.points:
             self.timeline.points.append(t)
             self.timeline.points.sort()
@@ -390,10 +679,8 @@ class SplitDialog(MediaDialog):
         self.result.setText(f"{len(cuts) + 1} clips, all in one new folder.")
 
     def params(self) -> dict:
-        mode = self.mode.get()
-        p = {"mode": mode, "parts": self.parts.value(), "every": self.every.value(),
-             "points": list(self.timeline.points), "fast": bool(self.fast and self.fast.isChecked())}
-        return p
+        return {"mode": self.mode.get(), "parts": self.parts.value(), "every": self.every.value(),
+                "points": list(self.timeline.points), "fast": bool(self.fast and self.fast.isChecked())}
 
 
 def split(paths, parent=None):
@@ -403,46 +690,75 @@ def split(paths, parent=None):
 
 # ---------------------------------------------------------------- redact
 
+REDACT_COLORS = ["#000000", "#FFFFFF", "#FF3B30", "#7C5CFF", "#FFCC00", "#34C759"]
+
+
 class RedactVideoDialog(MediaDialog):
+    """Boxes with their own time ranges; the effect plays live in the preview."""
+
     def __init__(self, path):
-        super().__init__("Redact video", path, "point", primary="Save copy")
-        self.style, self.color = "blur", "#000000"
-        self.tool = BoxesTool(lambda: {"style": self.style, "color": self.color, "start": 0.0,
-                                       "end": self.duration})
-        self.canvas.set_tool(self.tool)
-        self.canvas.changed.connect(self._selected)
-        self.body.addWidget(self.canvas, 1)
-        self.body.addWidget(self.timeline)
-        row = QHBoxLayout()
+        super().__init__("Redact video", path, "point", (1180, 860), "Save video")
+        self.style, self.color, self.strength = "blur", "#000000", 60
+        self.screen = ImageCanvas((480, 270))
+        self.tool = BoxesTool(lambda: {"style": self.style, "color": self.color, "strength": self.strength,
+                                       "start": 0.0, "end": self.duration})
+        self.screen.set_tool(self.tool)
+        self.screen.changed.connect(self._changed)
+        self.effect = self._apply
         styles = Segmented([("blur", "Blur"), ("pixelate", "Pixelate"), ("solid", "Solid colour")], "blur")
-        styles.changed.connect(self._style)
-        colors = Swatches([(c, c) for c in ("#000000", "#FFFFFF", "#FF3B30")], "#000000")
-        colors.changed.connect(self._color)
-        row.addWidget(styles)
-        row.addWidget(colors)
-        row.addStretch()
+        styles.changed.connect(lambda k: self._set("style", k))
+        colors = Swatches([(c, c) for c in REDACT_COLORS], "#000000", size=26, wrap=8)
+        colors.changed.connect(lambda c: self._set("color", c))
+        strength = SliderRow("Strength", 1, 100, 60, "%", width=70)
+        strength.changed.connect(lambda v: self._set("strength", v))
         self.start_edit, self.end_edit = TimeEdit(0), TimeEdit(self.duration)
         self.start_edit.changed.connect(lambda v: self._range(v, None))
         self.end_edit.changed.connect(lambda v: self._range(None, v))
-        row.addWidget(label("Box shows from"))
-        row.addWidget(self.start_edit)
-        row.addWidget(label("to"))
-        row.addWidget(self.end_edit)
-        row.addLayout(_buttons(("From here", lambda: self._range(self.timeline.playhead, None)),
-                               ("Until here", lambda: self._range(None, self.timeline.playhead)),
-                               ("Whole video", lambda: self._range(0.0, self.duration)),
-                               ("Delete box", self._delete)))
+        self.body.addWidget(self.screen, 1)
+        self.body.addWidget(self.transport)
+        self.body.addWidget(self.timeline)
+        row = QHBoxLayout()
+        row.addWidget(styles)
+        row.addWidget(strength, 1)
+        row.addWidget(label("Colour"))
+        row.addWidget(colors)
         self.body.addLayout(row)
-        self.body.addWidget(label("Drag over the area to hide. Each box has its own time range.", muted=True))
+        times = QHBoxLayout()
+        times.addWidget(label("Selected box shows from"))
+        times.addWidget(self.start_edit)
+        times.addWidget(label("to"))
+        times.addWidget(self.end_edit)
+        times.addStretch()
+        times.addLayout(_buttons(("From here", lambda: self._range(self.now(), None)),
+                                 ("Until here", lambda: self._range(None, self.now())),
+                                 ("Whole video", lambda: self._range(0.0, self.duration)),
+                                 ("Delete box", self._delete)))
+        self.body.addLayout(times)
+        self.body.addWidget(label("Drag over the area to hide. Drag a box to move it, its corners to resize "
+                                  "it; Delete removes it.", muted=True))
+
+    def _apply(self, img: QImage) -> QImage:
+        t = self.now()
+        boxes = [b for b in self.tool.boxes if b["start"] <= t <= b["end"]]
+        if not boxes:
+            return img
+        return to_qimage(imaging.redact(L.to_pil(img), boxes))
 
     def _box(self):
         return self.tool.boxes[self.tool.selected] if self.tool.selected is not None else None
 
-    def _selected(self):
+    def _changed(self):
         box = self._box()
         if box:
             self.start_edit.set(box["start"])
             self.end_edit.set(box["end"])
+        self.refresh_frame()
+
+    def _set(self, key, value):
+        setattr(self, key, value)
+        if self._box():
+            self._box()[key] = value
+        self.refresh_frame()
 
     def _range(self, start, end):
         box = self._box()
@@ -452,23 +768,13 @@ class RedactVideoDialog(MediaDialog):
             box["start"] = max(0.0, min(start, box["end"] - 0.05))
         if end is not None:
             box["end"] = min(self.duration, max(end, box["start"] + 0.05))
-        self._selected()
-
-    def _style(self, key):
-        self.style = key
-        if self._box():
-            self._box()["style"] = key
-
-    def _color(self, c):
-        self.color = c
-        if self._box():
-            self._box()["color"] = c
+        self._changed()
 
     def _delete(self):
         if self.tool.selected is not None:
             self.tool.boxes.pop(self.tool.selected)
             self.tool.selected = None
-            self.canvas.update()
+            self.refresh_frame()
 
     def params(self):
         return {"areas": self.tool.boxes} if self.tool.boxes else None
@@ -540,10 +846,10 @@ class VisualizerDialog(GlassDialog):
         self.canvas = ImageCanvas()
         self.style = Segmented([("wave", "Waveform"), ("bars", "Bars"), ("still", "Still image")], "wave")
         self.size = Segmented([(k, k) for k in media.VISUALIZER_SIZES], "Square")
-        waves = Swatches([(c, c) for c in ("#FFFFFF", "#FFCC00", "#34D399", "#06B6D4", "#F472B6",
-                                                       "#7C5CFF", "#111114")], "#FFFFFF")
-        backs = Swatches([(c, c) for c in ("#16161D", "#0F2027", "#3F6FE0", "#7A4FD8", "#F4D35E",
-                                                       "#FFFFFF")], "#16161D")
+        waves = Swatches([(c, c) for c in ("#FFFFFF", "#FFCC00", "#34D399", "#06B6D4", "#F472B6", "#7C5CFF",
+                                           "#111114")], "#FFFFFF", size=26, wrap=8)
+        backs = Swatches([(c, c) for c in ("#16161D", "#0F2027", "#3F6FE0", "#7A4FD8", "#F4D35E", "#FFFFFF")],
+                         "#16161D", size=26, wrap=7)
         pick = QPushButton("Image…")
         pick.clicked.connect(self._pick)
         waves.changed.connect(lambda c: (setattr(self, "color", c), self._render()))
@@ -583,8 +889,6 @@ class VisualizerDialog(GlassDialog):
         self._render()
 
     def _render(self):
-        from PIL import ImageOps
-
         from spinvert.engines.imaging import hex_rgb
 
         W, H = media.VISUALIZER_SIZES[self.size.get()]
@@ -656,8 +960,9 @@ def channels(paths, parent=None):
 
 class BleepDialog(MediaDialog):
     def __init__(self, path):
-        super().__init__("Bleep", path, "ranges", primary="Save copy", show_frame=False)
+        super().__init__("Bleep", path, "ranges", (1120, 720), "Save copy", start_at=0.0)
         tl = self.timeline
+        self.body.addWidget(self.transport)
         self.body.addWidget(tl, 1)
         self.tone = Segmented([("beep", "Beep 1 kHz"), ("low", "Beep 440 Hz"), ("silence", "Silence")], "beep")
         self.start_edit, self.end_edit = TimeEdit(0), TimeEdit(0)
@@ -672,16 +977,16 @@ class BleepDialog(MediaDialog):
         row.addStretch()
         row.addWidget(self.tone)
         self.body.addLayout(row)
-        self.body.addLayout(_buttons(("▶ Original", lambda: self._play(False)), ("▶ Bleeped", lambda: self._play(True)),
-                                     ("■ Stop", stop_sound)))
-        self.status = label("Click on the waveform, then + Bleep here. Drag a red range to move it, "
+        self.body.addLayout(_buttons(("▶ Hear it bleeped", lambda: self._play(True)),
+                                     ("▶ Hear the original", lambda: self._play(False)), ("■ Stop", stop_sound)))
+        self.status = label("Play or click on the waveform, then + Bleep here. Drag a red range to move it, "
                             "or its edges to fine-tune.", muted=True)
         self.body.addWidget(self.status)
         tl.changed.connect(self._sync)
 
     def _add(self):
         tl = self.timeline
-        a = tl.playhead
+        a = self.now()
         tl.ranges.append([a, min(self.duration, a + 1.0)])
         tl.selected = len(tl.ranges) - 1
         tl.update()
@@ -724,7 +1029,7 @@ class BleepDialog(MediaDialog):
         elif tl.ranges:
             a, b = tl.ranges[0]
         else:
-            a, b = tl.playhead, tl.playhead
+            a, b = self.now(), self.now()
         w0, w1 = max(0.0, a - 1.5), min(self.duration, b + 1.5)
         graph = None
         if bleeped and tl.ranges:
@@ -732,7 +1037,7 @@ class BleepDialog(MediaDialog):
             shifted = [[x - w0, y - w0] for x, y in tl.ranges if y > w0 and x < w1]
             if shifted:
                 graph = media.bleep_graph(shifted, self.info["rate"] or 48000, w1 - w0, tone, freq)
-        self.play(w0, w1, "", graph)
+        self.play_preview(w0, w1, "", graph)
 
     def params(self):
         if not self.timeline.ranges:

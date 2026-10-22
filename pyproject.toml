@@ -11,6 +11,7 @@ license = "MIT"
 requires-python = ">=3.10"
 dependencies = [
     "PySide6-Essentials>=6.7",
+    "PySide6-Addons>=6.7",  # Qt Multimedia: playback with sound in the editors
     "Pillow>=11.2",
     "pillow-heif>=0.18",
     "pypdf>=5.0",

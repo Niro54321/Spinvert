@@ -46,6 +46,7 @@ class LayerCanvas(QWidget):
         self.defaults = {}         # style for new layers, per kind
         self.editor = None
         self.editing = None
+        self.time = None           # video: only layers whose start..end covers this show
         self._mode = None
         self._history, self._future = [json.dumps(self.layers)], []
         self.setMouseTracking(True)
@@ -91,6 +92,11 @@ class LayerCanvas(QWidget):
     @property
     def current(self):
         return self.layer(self.selected)
+
+    def visible(self) -> list:
+        if self.time is None:
+            return self.layers
+        return [x for x in self.layers if x.get("start", 0) <= self.time <= x.get("end", 1e12)]
 
     # history ------------------------------------------------------------
 
@@ -262,7 +268,7 @@ class LayerCanvas(QWidget):
         p.translate(t.topLeft())
         s = self._scale()
         p.scale(s, s)
-        L.paint_all(p, self.layers, self.W, self.H, self.image, skip=self.editing)
+        L.paint_all(p, self.visible(), self.W, self.H, self.image, skip=self.editing)
         p.restore()
         layer = self.current
         if layer and self.editing != layer["id"]:
@@ -302,7 +308,7 @@ class LayerCanvas(QWidget):
 
     def _hit(self, pos: QPointF):
         img = self.to_img(pos)
-        return L.top_hit(self.layers, img.x(), img.y(), self.W, self.H, slack=6 / self._scale())
+        return L.top_hit(self.visible(), img.x(), img.y(), self.W, self.H, slack=6 / self._scale())
 
     def mousePressEvent(self, e):
         self.setFocus()

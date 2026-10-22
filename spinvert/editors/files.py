@@ -207,6 +207,10 @@ class OrderDialog(GlassDialog):
             row.addWidget(b)
         row.addStretch()
         self.body.addLayout(row)
+        self.gap = None
+        if all(category(p) == "audio" for p in paths):  # joining recordings: silence between them
+            self.gap = SliderRow("Gap between files", 0, 100, 0, " s", scale=10, width=130)
+            self.body.addWidget(self.gap)
 
     def _reverse(self):
         items = [self.list.takeItem(0) for _ in range(self.list.count())]
@@ -216,10 +220,16 @@ class OrderDialog(GlassDialog):
     def order(self) -> list[int]:
         return [self.list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.list.count())]
 
+    def params(self) -> dict:
+        p = {"order": self.order()}
+        if self.gap is not None:
+            p["gap"] = self.gap.get() / 10
+        return p
+
 
 def order_files(paths, parent=None):
     d = OrderDialog(paths)
-    return {"order": d.order()} if d.run() else None
+    return d.params() if d.run() else None
 
 
 # ------------------------------------------------------- one PDF or many?
