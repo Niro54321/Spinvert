@@ -67,6 +67,7 @@ def process_at(x: int, y: int) -> str:
 
 
 class DragWatcher(QObject):
+    pressed = Signal(int, int)  # mouse down where a drag may start (physical px)
     triggered = Signal(str)   # a mode key was pressed during a drag: open the wheel
     switched = Signal(str)    # a mode key was pressed while the wheel is open
     released = Signal()       # the mouse button went up
@@ -101,6 +102,8 @@ class DragWatcher(QObject):
             self.down_at = pos
             self.dragging = False
             self.source_ok = (not settings.explorer_only) or process_at(*pos) == "explorer.exe"
+            if self.source_ok:
+                self.pressed.emit(*pos)
         if button and not self.dragging:
             threshold = max(8, user32.GetSystemMetrics(SM_CXDRAG))
             if math.dist(pos, self.down_at) > threshold:

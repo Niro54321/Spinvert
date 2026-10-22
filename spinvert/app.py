@@ -8,123 +8,22 @@ import json
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QRectF, Qt, QTimer
-from PySide6.QtGui import QAction, QColor, QCursor, QPainter, QPen
+from PySide6.QtCore import QObject, QTimer
+from PySide6.QtGui import QAction, QCursor
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
-from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QMenu, QPushButton,
-                               QSystemTrayIcon, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
-from spinvert import APP_NAME, __version__, mainthread
+from spinvert import APP_NAME, __version__, glass, mainthread
 from spinvert.catalog import detect_engines
+from spinvert.dropwindow import DropWindow
 from spinvert.jobs import JobManager
 from spinvert.progress import ProgressWindow
 from spinvert.settings import Settings
-from spinvert.theme import ACCENT, app_icon, draw_mark
+from spinvert.theme import app_icon
 from spinvert.watcher import DragWatcher
 from spinvert.wheel import KEY_NAMES, Wheel
 
 SERVER_NAME = f"spinvert-{getpass.getuser()}"
-
-
-class DropArea(QWidget):
-    """The dashed box in the drop window."""
-
-    def __init__(self, on_files):
-        super().__init__()
-        self.on_files = on_files
-        self.over = False
-        self.setAcceptDrops(True)
-        self.setMinimumSize(380, 200)
-
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.setDropAction(Qt.DropAction.CopyAction)
-            event.accept()
-            self.over = True
-            self.update()
-
-    def dragMoveEvent(self, event):
-        event.setDropAction(Qt.DropAction.CopyAction)
-        event.accept()
-
-    def dragLeaveEvent(self, event):
-        self.over = False
-        self.update()
-
-    def dropEvent(self, event):
-        self.over = False
-        self.update()
-        paths = [Path(u.toLocalFile()) for u in event.mimeData().urls() if u.isLocalFile()]
-        event.setDropAction(Qt.DropAction.CopyAction)
-        event.accept()
-        if paths:
-            # Open the wheel after the drop finishes, so Explorer is not kept waiting.
-            QTimer.singleShot(0, lambda: self.on_files(paths))
-
-    def paintEvent(self, event):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = QRectF(self.rect()).adjusted(6, 6, -6, -6)
-        accent = QColor(ACCENT["convert"])
-        fill = QColor(accent)
-        fill.setAlpha(40 if self.over else 14)
-        pen = QPen(accent, 2, Qt.PenStyle.DashLine)
-        p.setPen(pen)
-        p.setBrush(fill)
-        p.drawRoundedRect(rect, 16, 16)
-        size = 56
-        draw_mark(p, QRectF(rect.center().x() - size / 2, rect.top() + 30, size, size))
-        p.setPen(self.palette().windowText().color())
-        font = self.font()
-        font.setPixelSize(17)
-        font.setBold(True)
-        p.setFont(font)
-        p.drawText(QRectF(rect.left(), rect.top() + 96, rect.width(), 26),
-                   Qt.AlignmentFlag.AlignCenter, "Drop files here")
-        font.setPixelSize(12)
-        font.setBold(False)
-        p.setFont(font)
-        p.drawText(QRectF(rect.left(), rect.top() + 124, rect.width(), 20),
-                   Qt.AlignmentFlag.AlignCenter, "then pick a format on the wheel")
-
-
-class DropWindow(QWidget):
-    def __init__(self, controller):
-        super().__init__()
-        self.controller = controller
-        self.setWindowTitle(APP_NAME)
-        self.setWindowIcon(app_icon())
-        self.area = DropArea(lambda paths: controller.open_files(paths))
-        self.tip = QLabel()
-        self.tip.setWordWrap(True)
-        self.tip.setTextFormat(Qt.TextFormat.RichText)
-        settings = QPushButton("Settings")
-        settings.clicked.connect(controller.show_settings)
-        hide = QPushButton("Hide to tray")
-        hide.clicked.connect(self.hide)
-        row = QHBoxLayout()
-        row.addWidget(settings)
-        row.addStretch()
-        row.addWidget(hide)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 12)
-        layout.addWidget(self.area, 1)
-        layout.addWidget(self.tip)
-        layout.addLayout(row)
-        self.refresh_tip()
-        self.resize(460, 380)
-
-    def refresh_tip(self):
-        s = self.controller.settings
-        self.tip.setText(
-            f"<b>Faster:</b> start dragging any file in File Explorer, then press "
-            f"<b>{KEY_NAMES[s.convert_key]}</b> to convert or <b>{KEY_NAMES[s.tools_key]}</b> "
-            f"for tools. Drop it on the wheel. Esc cancels.")
-
-    def closeEvent(self, event):
-        event.ignore()
-        self.hide()
-        self.controller.note_still_running()
 
 
 class Controller(QObject):
@@ -138,17 +37,29 @@ class Controller(QObject):
         self.jobs.finished.connect(self._job_finished)
         self.wheel = Wheel(self)
         self.wheel.chosen.connect(self.run_choice)
+        self.snapshot = None
         self.watcher = DragWatcher(lambda: self.settings, self.wheel.isVisible, self)
-        self.watcher.triggered.connect(lambda mode: self.wheel.open_drag(mode, QCursor.pos()))
+        self.watcher.pressed.connect(self._take_snapshot)
+        self.watcher.triggered.connect(
+            lambda mode: self.wheel.open_drag(mode, QCursor.pos(), self.snapshot))
         self.watcher.switched.connect(self.wheel.set_mode)
-        self.watcher.released.connect(lambda: QTimer.singleShot(400, self.wheel.close_if_no_drop))
+        self.watcher.released.connect(self.wheel.on_button_released)
         self.watcher.escaped.connect(self.wheel.close_wheel)
         self.drop_window = DropWindow(self)
+        self.drop_window.place()
         self.batch_saved = 0
         self.batch_failed = 0
         self._told_running = False
         self._build_tray()
         self.watcher.start()
+
+    def _take_snapshot(self, x: int, y: int):
+        """The screen at the mouse press that may start a drag, before Explorer's
+        drag image is drawn. Kept in memory only, for the wheel's glass."""
+        try:
+            self.snapshot = glass.snapshot_at(x, y)
+        except Exception:
+            self.snapshot = None
 
     # tray
 
@@ -178,7 +89,8 @@ class Controller(QObject):
             self.show_drop_window()
 
     def show_drop_window(self):
-        self.drop_window.refresh_tip()
+        if not self.drop_window.isVisible():
+            self.drop_window.refresh_backdrop()  # while hidden, so the glass shows what's behind
         self.drop_window.show()
         self.drop_window.raise_()
         self.drop_window.activateWindow()
@@ -187,7 +99,7 @@ class Controller(QObject):
         from spinvert.dialogs import SettingsDialog
 
         SettingsDialog(self, self.drop_window if self.drop_window.isVisible() else None).exec()
-        self.drop_window.refresh_tip()
+        self.drop_window.update()
 
     def note_still_running(self):
         if not self._told_running:

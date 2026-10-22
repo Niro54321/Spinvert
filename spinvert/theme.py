@@ -131,6 +131,19 @@ def save_ico(path) -> None:
         path, sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (256, 256)])
 
 
+def soft_text(p: QPainter, rect: QRectF, text: str, color: QColor, shadow: QColor,
+              flags=Qt.AlignmentFlag.AlignCenter) -> None:
+    """Text with a soft shadow under it, so it reads on any glass."""
+    if shadow.alpha():
+        faint = QColor(shadow)
+        faint.setAlpha(shadow.alpha() // 2)
+        for (dx, dy), pen in (((0, 2), faint), ((1, 1), faint), ((-1, 1), faint), ((0, 1), shadow)):
+            p.setPen(pen)
+            p.drawText(rect.translated(dx, dy), flags, text)
+    p.setPen(color)
+    p.drawText(rect, flags, text)
+
+
 def thin_pen(color: QColor, width: float = 1.0) -> QPen:
     pen = QPen(color)
     pen.setWidthF(width)

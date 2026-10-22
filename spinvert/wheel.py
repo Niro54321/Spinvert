@@ -6,8 +6,10 @@ Two ways in:
 - click mode: opened with known files (Send to, the drop window). Click a
   segment, click the hub to switch wheels, click outside or Esc to close.
 
-It is drawn as frosted glass: what is on screen behind it shows through,
-blurred (see glass.py).
+The highlight follows the cursor position itself (polled), and letting go of
+the mouse over a segment picks it, even if Windows' drag-and-drop gave up on
+the wheel after the file left it and came back. It is drawn as frosted glass
+over a snapshot of the screen behind it (see glass.py).
 """
 
 from __future__ import annotations
@@ -22,8 +24,8 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 from spinvert import glass
 from spinvert.catalog import choices_for
-from spinvert.theme import ACCENT, ON_BRIGHT, ON_DARK, annulus, pill_segment, thin_pen
-from spinvert.watcher import VK, _down
+from spinvert.theme import ACCENT, ON_BRIGHT, ON_DARK, annulus, pill_segment, soft_text, thin_pen
+from spinvert.watcher import VK, _cursor, _down
 
 SIZE = 380
 R_OUT = 168
@@ -34,6 +36,7 @@ ROUND = 7        # px corner rounding of segments
 TITLES = {"convert": "Convert", "tools": "Tools"}
 KEY_NAMES = {"shift": "Shift", "ctrl": "Ctrl", "alt": "Alt"}
 CENTER = Qt.AlignmentFlag.AlignCenter
+NO_SHADOW = QColor(0, 0, 0, 0)
 
 
 class Wheel(QWidget):
@@ -57,9 +60,11 @@ class Wheel(QWidget):
         self.dropped = False
         self.hover = None
         self.backdrop = None
+        self.src = None
         self.look = ON_DARK
         self._base = None
         self._shapes, self._shapes_n = [], -1
+        self._release_hover = None
         self.t = 1.0
         self.anim = QVariantAnimation(self)
         self.anim.setDuration(160)
@@ -67,6 +72,9 @@ class Wheel(QWidget):
         self.anim.setEndValue(1.0)
         self.anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         self.anim.valueChanged.connect(self._tick)
+        self.tracker = QTimer(self)
+        self.tracker.setInterval(16)
+        self.tracker.timeout.connect(self._track)
         self.outside = QTimer(self)
         self.outside.setInterval(30)
         self.outside.timeout.connect(self._watch_outside_click)
@@ -75,33 +83,52 @@ class Wheel(QWidget):
 
     # opening and closing
 
-    def open_drag(self, mode: str, pos) -> None:
+    def open_drag(self, mode: str, pos, snapshot=None) -> None:
         self.drag_mode, self.dropped, self.pending = True, False, True
         self.items, self.choices, self.hover, self.mode = [], [], None, mode
-        self._base = None
-        self._show_at(pos)
+        self._show_at(pos, snapshot)
 
     def open_click(self, items: list[Path], mode: str, pos) -> None:
         if self.isVisible():
             self.close_wheel()
             QApplication.processEvents()
+        snapshot = glass.snapshot_at(*_cursor())  # before the wheel is on screen
         self.drag_mode, self.dropped, self.pending = False, False, False
         self.items, self.mode, self.hover = list(items), mode, None
         self._recompute()
         self._button_was_down = True
-        self._show_at(pos)
+        self._show_at(pos, snapshot)
         self.outside.start()
 
     def close_wheel(self) -> None:
         self.outside.stop()
+        self.tracker.stop()
         self.anim.stop()
         self.hide()
         self.items, self.choices, self.hover = [], [], None
-        self._base = None
+        self.backdrop = self.src = self._base = None
 
-    def close_if_no_drop(self) -> None:
+    def on_button_released(self) -> None:
+        """The mouse button went up during a drag: pick what is under the cursor."""
         if self.isVisible() and self.drag_mode and not self.dropped:
+            self._release_hover = self._under_cursor()
+            # Give a real drop event a moment to arrive first.
+            QTimer.singleShot(150, self._finish_drag)
+
+    def _finish_drag(self) -> None:
+        if not self.isVisible() or not self.drag_mode or self.dropped:
+            return
+        seg = self._release_hover
+        if isinstance(seg, int) and seg < len(self.choices):
+            self._choose(seg)
+        else:
             self.close_wheel()
+
+    def _choose(self, index: int) -> None:
+        self.dropped = True
+        choice = self.choices[index]
+        self.close_wheel()
+        self.chosen.emit(choice)
 
     def set_mode(self, mode: str) -> None:
         if mode != self.mode:
@@ -109,27 +136,35 @@ class Wheel(QWidget):
             self._recompute()
             self.update()
 
-    def _show_at(self, pos) -> None:
+    def _show_at(self, pos, snapshot) -> None:
         screen = QGuiApplication.screenAt(pos) or QGuiApplication.primaryScreen()
         geo = screen.availableGeometry()
         x = min(max(pos.x() - SIZE // 2, geo.left()), geo.right() - SIZE)
         y = min(max(pos.y() - SIZE // 2, geo.top()), geo.bottom() - SIZE)
-        self.set_backdrop(glass.capture(x, y, SIZE, SIZE))
         self.move(x, y)
         self.t = 0.0
+        self._base = None
         self.show()
         self.raise_()
+        self.set_backdrop(snapshot)
         self.anim.start()
+        self.tracker.start()
 
-    def set_backdrop(self, image) -> None:
-        """Frost a screenshot of what is behind the wheel. None: plain dark glass."""
-        self.backdrop, self.look, self._base = None, ON_DARK, None
-        if image is not None:
-            try:
-                self.backdrop, brightness = glass.frost(image, SIZE)
-                self.look = ON_BRIGHT if brightness > 0.6 else ON_DARK
-            except Exception:
-                self.backdrop = None
+    def set_backdrop(self, snapshot) -> None:
+        """Frost the part of a screen snapshot behind the wheel. None: plain dark glass."""
+        self.backdrop, self.src, self.look, self._base = None, None, ON_DARK, None
+        if snapshot is None:
+            return
+        rect = glass.window_rect(self)
+        try:
+            piece = snapshot.crop(rect)
+            if piece is None:
+                return
+            self.backdrop = glass.Backdrop(piece)
+            self.src = self.backdrop.source(rect)
+            self.look = ON_BRIGHT if self.backdrop.brightness(rect) > 0.6 else ON_DARK
+        except Exception:
+            self.backdrop = self.src = None
 
     def _tick(self, value):
         self.t = float(value)
@@ -140,7 +175,7 @@ class Wheel(QWidget):
         self.hover = None
         self._base = None
 
-    # geometry
+    # where the cursor is
 
     def _center(self) -> QPointF:
         return QPointF(SIZE / 2, SIZE / 2)
@@ -156,6 +191,17 @@ class Wheel(QWidget):
         clockwise = (90 - math.degrees(math.atan2(-dy, dx))) % 360
         span = 360 / len(self.choices)
         return int(((clockwise + span / 2) % 360) // span)
+
+    def _under_cursor(self):
+        return self._segment_at(QPointF(self.mapFromGlobal(QCursor.pos())))
+
+    def _track(self):
+        seg = self._under_cursor()
+        if seg != self.hover:
+            if not self.drag_mode and (seg == "hub") != (self.hover == "hub"):
+                self._base = None  # the hub's own hover look is in the cached layer
+            self.hover = seg
+            self.update()
 
     # drag and drop
 
@@ -178,37 +224,27 @@ class Wheel(QWidget):
         # Always Copy: a Move answer would let Explorer delete the source files.
         event.setDropAction(Qt.DropAction.CopyAction)
         event.accept()
-        self._drag_hover(event)
+        self._drag_answer(event)
 
     def dragMoveEvent(self, event):
-        self._drag_hover(event)
+        self._drag_answer(event)
 
-    def _drag_hover(self, event):
-        seg = self._segment_at(event.position())
-        if seg != self.hover:
-            self.hover = seg
-            self.update()
-        # Accept over the hub too, so no "not allowed" cursor shows inside the
-        # wheel. A drop on the hub just closes it.
-        if seg is not None:
+    def _drag_answer(self, event):
+        # Accept anywhere on the wheel, the hub too, so no "not allowed"
+        # cursor shows inside it. A drop on the hub just closes it.
+        if self._segment_at(event.position()) is not None:
             event.setDropAction(Qt.DropAction.CopyAction)
             event.accept()
         else:
             event.ignore()
-
-    def dragLeaveEvent(self, event):
-        self.hover = None
-        self.update()
+        self._track()
 
     def dropEvent(self, event):
         seg = self._segment_at(event.position())
         if isinstance(seg, int) and seg < len(self.choices):
             event.setDropAction(Qt.DropAction.CopyAction)
             event.accept()
-            self.dropped = True
-            choice = self.choices[seg]
-            self.close_wheel()
-            self.chosen.emit(choice)
+            self._choose(seg)
         else:
             event.ignore()
             self.close_wheel()
@@ -216,48 +252,25 @@ class Wheel(QWidget):
     # mouse (click mode)
 
     def mouseMoveEvent(self, event):
-        seg = self._segment_at(event.position())
-        if seg != self.hover:
-            hub_changed = (seg == "hub") != (self.hover == "hub")
-            self.hover = seg
-            if hub_changed:
-                self._base = None  # the hub's own hover look is in the cached layer
-            self.update()
+        self._track()
 
     def mousePressEvent(self, event):
         seg = self._segment_at(event.position())
         if isinstance(seg, int) and seg < len(self.choices):
-            choice = self.choices[seg]
-            self.close_wheel()
-            self.chosen.emit(choice)
+            self._choose(seg)
         elif seg == "hub":
             self.set_mode("tools" if self.mode == "convert" else "convert")
         else:
             self.close_wheel()
 
-    def leaveEvent(self, event):
-        if not self.drag_mode and self.hover is not None:
-            if self.hover == "hub":
-                self._base = None
-            self.hover = None
-            self.update()
-
     def _watch_outside_click(self):
         down = _down(VK["lbutton"]) or _down(VK["rbutton"])
-        if down and not self._button_was_down:
-            local = self.mapFromGlobal(QCursor.pos())
-            if self._segment_at(QPointF(local)) is None:
-                self.close_wheel()
+        if down and not self._button_was_down and self._under_cursor() is None:
+            self.close_wheel()
         self._button_was_down = down
 
-    # painting
-
-    # The glass, the idle segments and the hub are drawn once into a cached
-    # pixmap. A mouse move then only paints the highlighted segment on top.
-
-    def _invalidate(self) -> None:
-        self._base = None
-        self.update()
+    # painting: the glass, idle segments and hub are drawn once into a cached
+    # pixmap; a cursor move only paints the highlighted segment on top.
 
     def _segments(self):
         """(shape, label box) per segment, rebuilt only when the count changes."""
@@ -346,12 +359,12 @@ class Wheel(QWidget):
         """Fill a shape with the frosted backdrop, magnified a little like a lens."""
         p.save()
         p.setClipPath(shape)
-        if self.backdrop is not None:
+        if self.backdrop is not None and self.src is not None:
             p.save()
             p.translate(c)
             p.scale(zoom, zoom)
             p.translate(-c)
-            p.drawImage(QRectF(0, 0, SIZE, SIZE), self.backdrop)
+            p.drawImage(QRectF(0, 0, SIZE, SIZE), self.backdrop.image, self.src)
             p.restore()
         else:
             p.fillPath(shape, QColor(30, 30, 42, 225))
@@ -374,14 +387,6 @@ class Wheel(QWidget):
         p.setPen(thin_pen(look.outline, 1))
         p.drawEllipse(c, radius + 0.5, radius + 0.5)
 
-    @staticmethod
-    def _text(p, rect, text, color, shadow, flags=CENTER):
-        if shadow.alpha():
-            p.setPen(shadow)
-            p.drawText(rect.translated(0, 1), flags, text)
-        p.setPen(color)
-        p.drawText(rect, flags, text)
-
     def _label(self, p, text, rect, hovered, n, look):
         font = QFont(self.font())
         size = 15 if n <= 7 else 13 if n <= 10 else 11
@@ -391,8 +396,8 @@ class Wheel(QWidget):
         font.setWeight(QFont.Weight.Bold if hovered else QFont.Weight.DemiBold)
         p.setFont(font)
         color = look.hover_text if hovered else look.text
-        shadow = QColor(0, 0, 0, 0) if hovered else look.text_shadow
-        self._text(p, rect, text, color, shadow, CENTER | Qt.TextFlag.TextWordWrap)
+        shadow = NO_SHADOW if hovered else look.text_shadow
+        soft_text(p, rect, text, color, shadow, CENTER | Qt.TextFlag.TextWordWrap)
 
     def _hub(self, p, c, accent, look):
         hub = QPainterPath()
@@ -430,13 +435,13 @@ class Wheel(QWidget):
         font.setPixelSize(17)
         font.setWeight(QFont.Weight.Bold)
         p.setFont(font)
-        self._text(p, QRectF(c.x() - HUB, c.y() - 33, 2 * HUB, 24), title, look.text, look.text_shadow)
+        soft_text(p, QRectF(c.x() - HUB, c.y() - 33, 2 * HUB, 24), title, look.text, look.text_shadow)
 
         font.setPixelSize(11)
         font.setWeight(QFont.Weight.Medium)
         p.setFont(font)
         sub = QFontMetrics(font).elidedText(sub, Qt.TextElideMode.ElideMiddle, int(2 * HUB - 20))
-        self._text(p, QRectF(c.x() - HUB, c.y() - 9, 2 * HUB, 16), sub, look.muted, QColor(0, 0, 0, 0))
+        soft_text(p, QRectF(c.x() - HUB, c.y() - 9, 2 * HUB, 16), sub, look.muted, look.text_shadow)
 
         font.setPixelSize(10)
         font.setWeight(QFont.Weight.DemiBold)
@@ -446,4 +451,4 @@ class Wheel(QWidget):
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(look.pill)
         p.drawRoundedRect(pill, 9, 9)
-        self._text(p, pill, hint, look.text, QColor(0, 0, 0, 0))
+        soft_text(p, pill, hint, look.text, NO_SHADOW)
