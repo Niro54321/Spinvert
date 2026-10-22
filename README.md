@@ -140,14 +140,10 @@ Word, documents still convert to PDF with Spinvert's own writer.
 
 ## Roadmap
 
-- [x] **Research**: features, flows and a feature matrix ([`replica/`](replica/))
 - [x] **v0.1, Convert and Tools**: both wheels, every format in the table above, batch jobs, progress window, tray, settings, Send to, start with Windows
-- [ ] **v0.2, More tools**: compress to an exact size, trim audio and video, crop images, strip metadata from audio, video and PDF
+- [x] **v0.2, More tools**: compress to an exact size, trim and edit audio and video, crop images, metadata, screenshots
 - [ ] **v0.3, Windows touches**: Actions wheel (copy path, move, open in Terminal, share), global hotkey, a real Explorer right-click menu
 - [ ] **v1.0**: a one-click installer with FFmpeg included, and simple editors
-
-Progress against the plan is tracked in [`replica/features.csv`](replica/features.csv)
-(all 12 must-haves are done).
 
 ## Development
 
@@ -165,7 +161,6 @@ paths used on PCs without Microsoft Office.
 | `spinvert/catalog.py` | Every operation, and which ones fit a selection of files |
 | `spinvert/watcher.py` | Spots a file drag plus a key press |
 | `spinvert/wheel.py` | The radial wheel and its drop handling |
-| `replica/` | The product research: recon map and feature matrix |
 
 Built on [FFmpeg](https://ffmpeg.org/), [Pillow](https://python-pillow.org/),
 [pillow-heif](https://github.com/bigcat88/pillow_heif), [pypdf](https://github.com/py-pdf/pypdf),

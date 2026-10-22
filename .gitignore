@@ -1,5 +1,5 @@
-# Reference screenshots of the original app: research only, never published
-replica/screens/
+# Local research notes, never published
+replica/
 
 # Secrets and local config
 .env
