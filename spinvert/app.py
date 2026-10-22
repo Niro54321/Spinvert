@@ -99,7 +99,11 @@ class Controller(QObject):
     def show_settings(self):
         from spinvert.dialogs import SettingsDialog
 
-        SettingsDialog(self, self.drop_window if self.drop_window.isVisible() else None).exec()
+        dialog = SettingsDialog(self)
+        dialog.winId()  # a native window first, so the move below reaches Windows
+        dialog.place(self.drop_window if self.drop_window.isVisible() else None)
+        dialog.frame.refresh_backdrop()  # while hidden, so the glass shows what's behind
+        dialog.exec()
         self.drop_window.update()
 
     def note_still_running(self):
