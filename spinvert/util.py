@@ -97,6 +97,10 @@ def find_ffmpeg(custom: str = "") -> Path | None:
     found = shutil.which("ffmpeg")
     if found:
         candidates.append(Path(found))
+    # Installed by winget after this process started, so not on its PATH yet.
+    for base, links in (("LOCALAPPDATA", "Microsoft/WinGet/Links"), ("ProgramFiles", "WinGet/Links")):
+        if os.environ.get(base):
+            candidates.append(Path(os.environ[base]) / links / "ffmpeg.exe")
     for c in candidates:
         if c.is_file():
             return c

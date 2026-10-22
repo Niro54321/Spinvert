@@ -5,7 +5,7 @@ Fast, offline file conversion for Windows, right where your files already are.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Platform: Windows 10 | 11](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6)
-![Version: 0.1.0](https://img.shields.io/badge/version-0.1.0-7C5CFF)
+[![Version: 0.2.0](https://img.shields.io/badge/version-0.2.0-7C5CFF)](https://github.com/Niro54321/Spinvert/releases/latest)
 ![Offline: 100%](https://img.shields.io/badge/uploads-none-success)
 
 ---
@@ -110,7 +110,18 @@ Ideas added on top of the original, from what users of file converters ask for:
 - **Join and split audio** as well as video.
 - No 20-file limit, no account, and Windows touches: *Send to* menu, start with Windows.
 
-## Install and run
+## Install
+
+**[Download Spinvert-Setup-0.2.0.exe](https://github.com/Niro54321/Spinvert/releases/latest)**
+from the latest release and run it. Nothing else to install: Python and every
+library are inside. It installs for your Windows account only, so it needs no
+admin rights, and it can download **FFmpeg** (for audio and video) for you.
+
+The installer isn't code-signed yet, so Windows SmartScreen may say *"Windows
+protected your PC"*. Click **More info → Run anyway**. Uninstall it from
+*Settings → Apps* like any other app.
+
+### Run from source
 
 1. Install **Python 3.10 or newer** from [python.org](https://www.python.org/downloads/).
 2. Install **FFmpeg** for audio and video:
@@ -141,9 +152,9 @@ Word, documents still convert to PDF with Spinvert's own writer.
 ## Roadmap
 
 - [x] **v0.1, Convert and Tools**: both wheels, every format in the table above, batch jobs, progress window, tray, settings, Send to, start with Windows
-- [x] **v0.2, More tools**: compress to an exact size, trim and edit audio and video, crop images, metadata, screenshots
-- [ ] **v0.3, Windows touches**: Actions wheel (copy path, move, open in Terminal, share), global hotkey, a real Explorer right-click menu
-- [ ] **v1.0**: a one-click installer with FFmpeg included, and simple editors
+- [x] **v0.2, More tools**: editors for photos, video, audio and PDF, compress to an exact size, metadata, screenshots, and a one-click installer
+- [ ] **v0.3, Windows touches**: Actions wheel (copy path, move, open in Terminal, share), a real Explorer right-click menu
+- [ ] **v1.0**: a signed installer and automatic updates
 
 ## Development
 
@@ -155,12 +166,23 @@ The smoke test generates sample files of every type, runs every conversion and
 tool on them, and checks each output opens. Add `--no-office` to test the
 paths used on PCs without Microsoft Office.
 
+To build the installer (needs `pip install pyinstaller` in the venv and
+[Inno Setup 6](https://jrsoftware.org/isinfo.php)):
+
+```bash
+.venv\Scripts\python.exe packaging\build.py
+```
+
+It packages the app with PyInstaller, runs the smoke test and a video playback
+check inside the packaged app, then writes `dist\Spinvert-Setup-<version>.exe`.
+
 | Folder | What is in it |
 | --- | --- |
 | `spinvert/engines/` | One module per file family: images, media, pdfs, documents, slides, sheets, subtitles, archives, office |
 | `spinvert/catalog.py` | Every operation, and which ones fit a selection of files |
 | `spinvert/watcher.py` | Spots a file drag plus a key press |
 | `spinvert/wheel.py` | The radial wheel and its drop handling |
+| `packaging/` | The installer: PyInstaller recipe, Inno Setup script, build and self-test |
 
 Built on [FFmpeg](https://ffmpeg.org/), [Pillow](https://python-pillow.org/),
 [pillow-heif](https://github.com/bigcat88/pillow_heif), [pypdf](https://github.com/py-pdf/pypdf),
