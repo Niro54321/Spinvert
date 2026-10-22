@@ -8,6 +8,8 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFileDialog, QForm
                                QLabel, QLineEdit, QMessageBox, QPushButton, QSlider, QVBoxLayout)
 
 from spinvert import system
+from spinvert.capture import (ALONE_OK, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN, VK_SNAPSHOT, available,
+                              hotkey_text, modifier_text)
 from spinvert.glassui import MARGIN, GlassFrame
 from spinvert.settings import KEYS
 from spinvert.theme import app_icon
@@ -17,6 +19,91 @@ KEY_LABELS = {"shift": "Shift", "ctrl": "Ctrl", "alt": "Alt"}
 QUALITY_LABELS = {"high": "High (bigger files)", "balanced": "Balanced", "small": "Small files"}
 ENGINE_LABELS = [("ffmpeg", "FFmpeg"), ("pandoc", "Pandoc"), ("word", "Word"),
                  ("powerpoint", "PowerPoint"), ("excel", "Excel")]
+
+
+class ShortcutButton(QPushButton):
+    """Shows a key combination. Click it, then press the keys you want (Shift+Esc,
+    Ctrl+Alt+S, F9...). Esc on its own cancels."""
+
+    MODIFIERS = ((Qt.KeyboardModifier.ControlModifier, MOD_CONTROL), (Qt.KeyboardModifier.AltModifier, MOD_ALT),
+                 (Qt.KeyboardModifier.ShiftModifier, MOD_SHIFT), (Qt.KeyboardModifier.MetaModifier, MOD_WIN))
+    OWN = {Qt.Key.Key_Control: MOD_CONTROL, Qt.Key.Key_Alt: MOD_ALT, Qt.Key.Key_Shift: MOD_SHIFT,
+           Qt.Key.Key_Meta: MOD_WIN}
+    BARE = {*OWN, Qt.Key.Key_AltGr}
+
+    HINT = "click, then press the keys"
+
+    def __init__(self, hotkey):
+        super().__init__()
+        self.hotkey = hotkey
+        self.note = QLabel(self.HINT)  # what to do, or why a combination can't be used
+        self.note.setWordWrap(True)
+        self.modifiers, self.vk = hotkey.modifiers, hotkey.vk
+        self.recording = False
+        self.setMinimumWidth(200)
+        self.setToolTip("Click, then press the keys you want to use")
+        self.clicked.connect(self._start)
+        self._show()
+
+    def _show(self, text: str | None = None):
+        self.setText(text or hotkey_text(self.modifiers, self.vk))
+
+    def _mods(self, event) -> int:
+        return sum(flag for qt_flag, flag in self.MODIFIERS if event.modifiers() & qt_flag)
+
+    def _start(self):
+        if self.recording:
+            return
+        self.recording = True
+        self.hotkey.unregister()  # or pressing the current shortcut would take a screenshot
+        self._show("Press the keys…")
+        self.note.setText("Esc cancels")
+        self.grabKeyboard()
+
+    def _stop(self):
+        self.recording = False
+        self.releaseKeyboard()
+        self.hotkey.register()
+        self._show()
+        self.note.setText(self.HINT)
+
+    def _take(self, modifiers: int, vk: int):
+        if not modifiers and vk not in ALONE_OK:
+            self._show("Press the keys…")
+            self.note.setText(f"{hotkey_text(modifiers, vk)} alone would stop it typing. Add Ctrl, Alt, Shift or Win")
+        elif not available(modifiers, vk):
+            self._show("Press the keys…")
+            self.note.setText(f"Another app on this PC already uses {hotkey_text(modifiers, vk)}. Try another")
+        else:
+            self.modifiers, self.vk = modifiers, vk
+            self._stop()
+
+    def keyPressEvent(self, e):
+        if not self.recording:
+            super().keyPressEvent(e)
+            return
+        e.accept()
+        mods = self._mods(e)
+        if e.key() in self.BARE:
+            mods |= self.OWN.get(e.key(), 0)  # Qt leaves a modifier key out of its own press
+            self._show(f"{modifier_text(mods)}+…" if mods else "Press the keys…")
+        elif e.key() == Qt.Key.Key_Escape and not mods:
+            self._stop()
+        elif e.nativeVirtualKey():
+            self._take(mods, e.nativeVirtualKey())
+
+    def keyReleaseEvent(self, e):
+        if not self.recording:
+            super().keyReleaseEvent(e)
+            return
+        e.accept()
+        if e.key() == Qt.Key.Key_Print:  # Windows sends Print Screen as a release only
+            self._take(self._mods(e), VK_SNAPSHOT)
+
+    def focusOutEvent(self, e):
+        if self.recording:
+            self._stop()
+        super().focusOutEvent(e)
 
 
 class SettingsDialog(QDialog):
@@ -29,7 +116,7 @@ class SettingsDialog(QDialog):
         s = controller.settings
         self.setWindowTitle("Spinvert settings")
         self.setWindowIcon(app_icon())
-        self.resize(560, 480)
+        self.resize(580, 530)
         self.frame = GlassFrame(self, "Settings")
 
         self.convert_key = self._key_box(s.convert_key)
@@ -57,6 +144,10 @@ class SettingsDialog(QDialog):
         ffmpeg_row = QHBoxLayout()
         ffmpeg_row.addWidget(self.ffmpeg, 1)
         ffmpeg_row.addWidget(browse)
+        self.shortcut = ShortcutButton(controller.hotkey)
+        shortcut_row = QHBoxLayout()
+        shortcut_row.addWidget(self.shortcut)
+        shortcut_row.addStretch()
         self.startup = QCheckBox("Start Spinvert when Windows starts")
         self.startup.setChecked(system.startup_enabled())
         self.sendto = QCheckBox("Add Spinvert to the right-click \"Send to\" menu")
@@ -74,6 +165,8 @@ class SettingsDialog(QDialog):
         form.addRow("Convert wheel key", self.convert_key)
         form.addRow("Tools wheel key", self.tools_key)
         form.addRow("", self.explorer_only)
+        form.addRow("Screenshot shortcut", shortcut_row)
+        form.addRow("", self.shortcut.note)
         form.addRow("JPG / WebP quality", quality_row)
         form.addRow("Video quality", self.video_quality)
         form.addRow("FFmpeg", ffmpeg_row)
@@ -147,7 +240,14 @@ class SettingsDialog(QDialog):
         if convert_key == tools_key:
             QMessageBox.warning(self, "Spinvert", "The two wheels need different keys.")
             return
+        hotkey = self.controller.hotkey
+        wanted = self.shortcut.modifiers, self.shortcut.vk
+        if wanted != (hotkey.modifiers, hotkey.vk) and not hotkey.change(*wanted):
+            QMessageBox.warning(self, "Spinvert", f"Windows wouldn't give Spinvert {hotkey_text(*wanted)}: "
+                                "another app already uses it. Please pick another shortcut.")
+            return
         s = self.controller.settings
+        s.screenshot_modifiers, s.screenshot_key = hotkey.modifiers, hotkey.vk
         s.convert_key, s.tools_key = convert_key, tools_key
         s.explorer_only = self.explorer_only.isChecked()
         s.image_quality = self.image_quality.value()
@@ -162,4 +262,5 @@ class SettingsDialog(QDialog):
         except Exception as e:
             QMessageBox.warning(self, "Spinvert", f"Couldn't change the Windows setting: {e}")
         self.controller.refresh_engines()
+        self.controller.refresh_shortcut()
         self.accept()

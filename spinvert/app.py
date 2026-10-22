@@ -15,6 +15,7 @@ from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from spinvert import APP_NAME, __version__, glass, mainthread
+from spinvert.capture import Hotkey, Snipper
 from spinvert.catalog import detect_engines
 from spinvert.dropwindow import DropWindow
 from spinvert.jobs import JobManager
@@ -46,6 +47,9 @@ class Controller(QObject):
         self.watcher.switched.connect(self.wheel.set_mode)
         self.watcher.released.connect(self.wheel.on_button_released)
         self.watcher.escaped.connect(self.wheel.close_wheel)
+        self.hotkey = Hotkey(self.take_screenshot, self.settings.screenshot_modifiers, self.settings.screenshot_key)
+        app.installNativeEventFilter(self.hotkey)
+        self.snipper = None
         self.drop_window = DropWindow(self)
         self.drop_window.place()
         self.batch_saved = 0
@@ -53,11 +57,11 @@ class Controller(QObject):
         self._told_running = False
         self._build_tray()
         self.watcher.start()
-        from spinvert.capture import Hotkey
-
-        self.hotkey = Hotkey(self.take_screenshot)
-        app.installNativeEventFilter(self.hotkey)
-        self.snipper = None
+        self.refresh_shortcut()
+        if not self.hotkey.registered:
+            self.tray.showMessage(APP_NAME, f"Another app already uses {self.hotkey.text}, so screenshots "
+                                  "need another shortcut. Pick one in Settings.",
+                                  QSystemTrayIcon.MessageIcon.Warning, 8000)
 
     def _take_snapshot(self, x: int, y: int):
         """The screen at the mouse press that may start a drag, before Explorer's
@@ -75,12 +79,14 @@ class Controller(QObject):
                              f"{KEY_NAMES[self.settings.convert_key]}")
         menu = QMenu()
         for text, slot in [("Open Spinvert", self.show_drop_window),
-                           ("Take a screenshot\tCtrl+Alt+S", self.take_screenshot),
+                           ("Take a screenshot", self.take_screenshot),
                            ("Settings…", self.show_settings),
                            ("Show progress", self.progress.show)]:
             action = QAction(text, menu)
             action.triggered.connect(slot)
             menu.addAction(action)
+            if slot == self.take_screenshot:
+                self.shot_action = action
         menu.addSeparator()
         quit_action = QAction("Quit", menu)
         quit_action.triggered.connect(self.quit)
@@ -104,6 +110,12 @@ class Controller(QObject):
 
     # screenshots
 
+    def refresh_shortcut(self):
+        """Show the screenshot shortcut where it is mentioned."""
+        keys = self.hotkey.text if self.hotkey.registered else "no shortcut"
+        self.shot_action.setText(f"Take a screenshot\t{keys}")
+        self.drop_window.shot.setToolTip(f"Capture an area or the whole screen ({keys} anywhere)")
+
     def take_screenshot(self):
         if self.snipper is not None and self.snipper.overlays:
             return  # already choosing an area
@@ -114,8 +126,6 @@ class Controller(QObject):
         QTimer.singleShot(250 if hidden else 0, self._snip)
 
     def _snip(self):
-        from spinvert.capture import Snipper
-
         self.snipper = Snipper(self._edit_screenshot)
         self.snipper.start()
 

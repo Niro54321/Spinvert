@@ -20,6 +20,8 @@ class Settings:
     image_quality: int = 92
     video_quality: str = "balanced"
     ffmpeg_path: str = ""
+    screenshot_modifiers: int = 0x3  # Ctrl+Alt
+    screenshot_key: int = 0x53  # S
     welcomed: bool = False
 
     @property
@@ -47,6 +49,9 @@ class Settings:
         if s.tools_key not in KEYS or s.tools_key == s.convert_key:
             s.tools_key = next(k for k in KEYS if k != s.convert_key)
         s.image_quality = max(40, min(100, int(s.image_quality)))
+        if not (isinstance(s.screenshot_key, int) and 0 < s.screenshot_key < 0xFF
+                and isinstance(s.screenshot_modifiers, int) and 0 <= s.screenshot_modifiers <= 0xF):
+            s.screenshot_modifiers, s.screenshot_key = 0x3, 0x53
         return s
 
     def save(self) -> None:

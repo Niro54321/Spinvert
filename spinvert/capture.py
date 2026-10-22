@@ -1,8 +1,8 @@
 """Screenshots: freeze every screen, let the user drag an area (or click for the
 whole screen), and hand the picture to the screenshot editor.
 
-Also the global hotkey (Ctrl+Alt+S by default) that starts a screenshot from
-anywhere, through Windows' RegisterHotKey.
+Also the global shortcut (Ctrl+Alt+S unless changed in Settings) that starts a
+screenshot from anywhere, through Windows' RegisterHotKey.
 """
 
 from __future__ import annotations
@@ -138,17 +138,81 @@ class Snipper:
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 WM_HOTKEY = 0x0312
-MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_NOREPEAT = 0x1, 0x2, 0x4, 0x4000
+MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN, MOD_NOREPEAT = 0x1, 0x2, 0x4, 0x8, 0x4000
 HOTKEY_ID = 0x5350  # "SP"
+VK_SNAPSHOT = 0x2C
+
+KEY_NAMES = {0x08: "Backspace", 0x09: "Tab", 0x0D: "Enter", 0x13: "Pause", 0x14: "Caps Lock", 0x1B: "Esc",
+             0x20: "Space", 0x21: "Page Up", 0x22: "Page Down", 0x23: "End", 0x24: "Home", 0x25: "Left",
+             0x26: "Up", 0x27: "Right", 0x28: "Down", VK_SNAPSHOT: "Print Screen", 0x2D: "Insert",
+             0x2E: "Delete", 0x6A: "Num *", 0x6B: "Num +", 0x6D: "Num -", 0x6E: "Num .", 0x6F: "Num /",
+             0x91: "Scroll Lock"}
+# Keys that are fine on their own; anything else needs Ctrl, Alt, Shift or Win
+# or it would stop working for typing.
+ALONE_OK = {0x13, VK_SNAPSHOT, 0x2D, 0x91, *range(0x70, 0x88)}
+
+
+def key_name(vk: int) -> str:
+    if vk in KEY_NAMES:
+        return KEY_NAMES[vk]
+    if 0x30 <= vk <= 0x39 or 0x41 <= vk <= 0x5A:
+        return chr(vk)
+    if 0x60 <= vk <= 0x69:
+        return f"Num {vk - 0x60}"
+    if 0x70 <= vk <= 0x87:
+        return f"F{vk - 0x6F}"
+    char = user32.MapVirtualKeyW(vk, 2) & 0xFFFF  # punctuation keys, as printed on this keyboard
+    return chr(char).upper() if char else f"Key {vk}"
+
+
+def modifier_text(modifiers: int) -> str:
+    return "+".join(name for flag, name in ((MOD_CONTROL, "Ctrl"), (MOD_ALT, "Alt"), (MOD_SHIFT, "Shift"),
+                                            (MOD_WIN, "Win")) if modifiers & flag)
+
+
+def hotkey_text(modifiers: int, vk: int) -> str:
+    return "+".join(part for part in (modifier_text(modifiers), key_name(vk)) if part)
+
+
+def available(modifiers: int, vk: int) -> bool:
+    """Whether Windows would let Spinvert have this combination right now."""
+    if not user32.RegisterHotKey(None, HOTKEY_ID + 1, modifiers | MOD_NOREPEAT, vk):
+        return False
+    user32.UnregisterHotKey(None, HOTKEY_ID + 1)
+    return True
 
 
 class Hotkey(QAbstractNativeEventFilter):
-    """Ctrl+Alt+S anywhere in Windows calls `action` (on the UI thread)."""
+    """A key combination (Ctrl+Alt+S by default) that calls `action` from
+    anywhere in Windows, on the UI thread."""
 
-    def __init__(self, action, key: str = "S", modifiers: int = MOD_CONTROL | MOD_ALT):
+    def __init__(self, action, modifiers: int = MOD_CONTROL | MOD_ALT, vk: int = ord("S")):
         super().__init__()
         self.action = action
-        self.registered = bool(user32.RegisterHotKey(None, HOTKEY_ID, modifiers | MOD_NOREPEAT, ord(key)))
+        self.modifiers, self.vk = modifiers, vk
+        self.registered = False
+        self.register()
+
+    def register(self) -> bool:
+        if not self.registered:
+            self.registered = bool(user32.RegisterHotKey(None, HOTKEY_ID, self.modifiers | MOD_NOREPEAT, self.vk))
+        return self.registered
+
+    def change(self, modifiers: int, vk: int) -> bool:
+        """Switch to another combination. False (and the old one kept) if Windows
+        refuses it, usually because another app already uses it."""
+        old = self.modifiers, self.vk
+        self.unregister()
+        self.modifiers, self.vk = modifiers, vk
+        if self.register():
+            return True
+        self.modifiers, self.vk = old
+        self.register()
+        return False
+
+    @property
+    def text(self) -> str:
+        return hotkey_text(self.modifiers, self.vk)
 
     def nativeEventFilter(self, event_type, message):
         if bytes(event_type) == b"windows_generic_MSG":
@@ -162,4 +226,3 @@ class Hotkey(QAbstractNativeEventFilter):
         if self.registered:
             user32.UnregisterHotKey(None, HOTKEY_ID)
             self.registered = False
-

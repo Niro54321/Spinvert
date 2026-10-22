@@ -81,7 +81,9 @@ settings open a glass editor with a live preview; the result is always a new cop
 ### Screenshots
 
 Press **Ctrl+Alt+S** anywhere (or *Take a screenshot* in the tray menu, or the
-**Screenshot** button). Drag to capture an area, or just click to take the whole
+**Screenshot** button). To use other keys, open Settings, click the shortcut and press
+the keys you want (F9, Shift+F1, Print Screen...); Spinvert tells you at once if
+another app on your PC already has them. Drag to capture an area, or just click to take the whole
 screen; Esc cancels. The picture opens in the same layer editor as Annotate,
 starting on **Blur**: blur or pixelate anything private, type text in Arabic or
 English with any font installed on your PC, add arrows, boxes, numbers. Then
@@ -133,7 +135,7 @@ Word, documents still convert to PDF with Spinvert's own writer.
 - For the glass look, Spinvert keeps a snapshot of the screen behind the wheel
   (taken when you press the mouse in File Explorer) and behind its own window.
   It stays in memory, is replaced at the next press, and is never saved or sent.
-- Screenshots are taken only when you ask (Ctrl+Alt+S, the tray menu or the
+- Screenshots are taken only when you ask (your shortcut, the tray menu or the
   button), and saved only when you press Save.
 
 ## Roadmap
