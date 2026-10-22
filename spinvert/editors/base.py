@@ -3,13 +3,13 @@ on top (crop box, boxes, drawn shapes), a timeline, and small controls."""
 
 from __future__ import annotations
 
-import math
+
 import threading
 import winsound
 from pathlib import Path
 
 from PIL import Image
-from PySide6.QtCore import QObject, QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QObject, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (QColor, QCursor, QFont, QGuiApplication, QIcon, QImage, QPainter,
                            QPainterPath, QPen, QPixmap)
 from PySide6.QtWidgets import (QButtonGroup, QDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton,
@@ -253,48 +253,6 @@ class Segmented(QWidget):
             self.buttons[key].setChecked(True)
 
 
-class Swatches(QWidget):
-    """Round colour or gradient buttons."""
-
-    changed = Signal(object)
-
-    def __init__(self, items, current=None, size: int = 26, wrap: int = 12):
-        """items: [(key, QColor or QPixmap)]"""
-        super().__init__()
-        self.group = QButtonGroup(self)
-        self.buttons = {}
-        grid = QVBoxLayout(self)
-        grid.setContentsMargins(0, 0, 0, 0)
-        grid.setSpacing(6)
-        row = None
-        for i, (key, look) in enumerate(items):
-            if row is None or i % wrap == 0:
-                row = QHBoxLayout()
-                row.setSpacing(6)
-                grid.addLayout(row)
-            b = QPushButton()
-            b.setCheckable(True)
-            b.setFixedSize(size, size)
-            b.setProperty("swatch", True)
-            if isinstance(look, QPixmap):
-                b.setIcon(QIcon(look))
-                b.setIconSize(QSize(size - 6, size - 6))
-            else:
-                b.setStyleSheet(f"QPushButton {{ background: {QColor(look).name()}; }}")
-            b.clicked.connect(lambda _=False, k=key: self.changed.emit(k))
-            self.group.addButton(b)
-            self.buttons[key] = b
-            row.addWidget(b)
-        if row is not None:
-            row.addStretch()
-        if current in self.buttons:
-            self.buttons[current].setChecked(True)
-
-    def clear(self):
-        self.group.setExclusive(False)
-        for b in self.buttons.values():
-            b.setChecked(False)
-        self.group.setExclusive(True)
 
 
 class TimeEdit(QLineEdit):
@@ -409,6 +367,11 @@ class ImageCanvas(QWidget):
             self.update()
         else:
             super().keyPressEvent(e)
+
+    def wheelEvent(self, e):
+        if self.tool is not None and hasattr(self.tool, "wheel"):
+            self.tool.wheel(self.to_norm(e.position()), e.angleDelta().y())
+            self.update()
 
 
 def _handle(p: QPainter, pt: QPointF, r: float = 5.5):
@@ -546,8 +509,10 @@ class CropTool:
 
 
 class BoxesTool:
-    """Several movable boxes (for redaction). Drag on empty space to add one,
-    drag a box to move it, Delete removes the selected one."""
+    """Several boxes (for redaction). Drag on empty space to add one, drag a
+    box to move it, drag a corner of the selected box to resize it, Delete
+    removes it. Boxes show only their effect: no outline, just small corner
+    handles on the selected one."""
 
     def __init__(self, new_box):
         self.boxes = []          # dicts with "rect" plus whatever new_box() adds
@@ -563,7 +528,21 @@ class BoxesTool:
                 return i
         return None
 
+    def _corner_at(self, pos):
+        if self.selected is None:
+            return None
+        r = self.canvas.norm_rect(self.boxes[self.selected]["rect"])
+        p = self.canvas.to_widget(*pos)
+        for name, c in (("tl", r.topLeft()), ("tr", r.topRight()), ("bl", r.bottomLeft()), ("br", r.bottomRight())):
+            if abs(p.x() - c.x()) < 9 and abs(p.y() - c.y()) < 9:
+                return name
+        return None
+
     def press(self, pos, e):
+        corner = self._corner_at(pos)
+        if corner:
+            self._drag = ("corner", corner, list(self.boxes[self.selected]["rect"]))
+            return
         i = self._index_at(pos)
         if i is not None:
             self.selected = i
@@ -578,18 +557,32 @@ class BoxesTool:
 
     def move(self, pos, e):
         if not self._drag or self.selected is None:
-            self.canvas.setCursor(Qt.CursorShape.SizeAllCursor if self._index_at(pos) is not None
+            corner = self._corner_at(pos)
+            self.canvas.setCursor(Qt.CursorShape.SizeFDiagCursor if corner else
+                                  Qt.CursorShape.SizeAllCursor if self._index_at(pos) is not None
                                   else Qt.CursorShape.CrossCursor)
             return
         kind, start, orig = self._drag
         box = self.boxes[self.selected]
         if kind == "new":
             box["rect"] = [min(start[0], pos[0]), min(start[1], pos[1]), max(start[0], pos[0]), max(start[1], pos[1])]
+        elif kind == "corner":
+            x0, y0, x1, y1 = orig
+            if "l" in start:
+                x0 = pos[0]
+            else:
+                x1 = pos[0]
+            if "t" in start:
+                y0 = pos[1]
+            else:
+                y1 = pos[1]
+            box["rect"] = [min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)]
         else:
             w, h = orig[2] - orig[0], orig[3] - orig[1]
             nx = min(max(0.0, orig[0] + pos[0] - start[0]), 1 - w)
             ny = min(max(0.0, orig[1] + pos[1] - start[1]), 1 - h)
             box["rect"] = [nx, ny, nx + w, ny + h]
+        self.canvas.changed.emit()
 
     def release(self, pos, e):
         if self._drag and self._drag[0] == "new" and self.selected is not None:
@@ -607,92 +600,13 @@ class BoxesTool:
             self.canvas.changed.emit()
 
     def paint(self, p: QPainter, canvas):
-        for i, box in enumerate(self.boxes):
-            r = canvas.norm_rect(box["rect"])
-            sel = i == self.selected
-            pen = QPen(QColor(ACCENT_COLOR) if sel else QColor("white"), 2 if sel else 1.4, Qt.PenStyle.DashLine)
-            p.setPen(pen)
-            p.setBrush(QColor(124, 92, 255, 40) if sel else Qt.BrushStyle.NoBrush)
-            p.drawRoundedRect(r, 4, 4)
-
-
-class ShapesTool:
-    """Draw annotations: drag for arrows, boxes, circles, lines, the magnifier;
-    draw freely with pen and highlighter; click for text and numbers."""
-
-    CLICK = ("text", "number")
-
-    def __init__(self):
-        self.shapes = []
-        self.kind = "arrow"
-        self.color = "#FF3B30"
-        self.width = 6
-        self.text = "Text"
-        self.canvas = None
-        self._current = None
-
-    def press(self, pos, e):
-        if self.kind in self.CLICK:
-            shape = {"type": self.kind, "points": [list(pos)], "color": self.color, "width": self.width}
-            if self.kind == "text":
-                shape["text"], shape["size"] = self.text or "Text", 14 + self.width * 4
-            self.shapes.append(shape)
-            self.canvas.changed.emit()
+        if self.selected is None or self.selected >= len(self.boxes):
             return
-        self._current = {"type": self.kind, "points": [list(pos), list(pos)], "color": self.color,
-                         "width": self.width}
-
-    def move(self, pos, e):
-        if self._current is None:
-            self.canvas.setCursor(Qt.CursorShape.CrossCursor)
-            return
-        if self.kind in ("pen", "highlight"):
-            self._current["points"].append(list(pos))
-        else:
-            self._current["points"][-1] = list(pos)
-
-    def release(self, pos, e):
-        if self._current is not None:
-            pts = self._current["points"]
-            if self.kind in ("pen", "highlight") or math.dist(pts[0], pts[-1]) > 0.005:
-                self.shapes.append(self._current)
-            self._current = None
-            self.canvas.changed.emit()
-
-    def undo(self):
-        if self.shapes:
-            self.shapes.pop()
-            self.canvas.changed.emit()
-
-    def paint(self, p: QPainter, canvas):
-        s = self._current
-        if s is None:
-            return
-        color = QColor(s["color"])
-        unit = max(canvas.target().width(), canvas.target().height()) / 1000
-        width = max(1.0, s["width"] * unit)
-        if s["type"] == "highlight":
-            color.setAlpha(110)
-            width *= 4
-        p.setPen(QPen(color, width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        pts = [canvas.to_widget(*pt) for pt in s["points"]]
-        a, b = pts[0], pts[-1]
-        if s["type"] in ("pen", "highlight"):
-            path = QPainterPath(a)
-            for pt in pts[1:]:
-                path.lineTo(pt)
-            p.drawPath(path)
-        elif s["type"] in ("arrow", "line"):
-            p.drawLine(a, b)
-        elif s["type"] == "rect":
-            p.drawRoundedRect(QRectF(a, b).normalized(), 4, 4)
-        elif s["type"] == "ellipse":
-            p.drawEllipse(QRectF(a, b).normalized())
-        elif s["type"] == "magnify":
-            r = math.dist((a.x(), a.y()), (b.x(), b.y()))
-            p.setPen(QPen(QColor("white"), 2))
-            p.drawEllipse(a, r, r)
+        r = canvas.norm_rect(self.boxes[self.selected]["rect"])
+        for c in (r.topLeft(), r.topRight(), r.bottomLeft(), r.bottomRight()):
+            p.setPen(QPen(QColor(ACCENT_COLOR), 1.6))
+            p.setBrush(QColor("white"))
+            p.drawEllipse(c, 5, 5)
 
 
 # ------------------------------------------------------------ the timeline

@@ -14,8 +14,9 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QCheckBox, QDoubleSpinBox, QFileDialog, QHBoxLayout, QPushButton, QSpinBox
 
 from spinvert.editors.base import (Background, BoxesTool, CropTool, GlassDialog, ImageCanvas, Segmented,
-                                   SliderRow, Swatches, TimeEdit, Timeline, busy, color_icon, fmt_time, label,
+                                   SliderRow, TimeEdit, Timeline, busy, fmt_time, label,
                                    play_wav, qimage_from_png, stop_sound, to_qimage)
+from spinvert.editors.pickers import Swatches
 from spinvert.engines import media
 from spinvert.settings import Settings
 
@@ -415,7 +416,7 @@ class RedactVideoDialog(MediaDialog):
         row = QHBoxLayout()
         styles = Segmented([("blur", "Blur"), ("pixelate", "Pixelate"), ("solid", "Solid colour")], "blur")
         styles.changed.connect(self._style)
-        colors = Swatches([(c, color_icon(c)) for c in ("#000000", "#FFFFFF", "#FF3B30")], "#000000")
+        colors = Swatches([(c, c) for c in ("#000000", "#FFFFFF", "#FF3B30")], "#000000")
         colors.changed.connect(self._color)
         row.addWidget(styles)
         row.addWidget(colors)
@@ -539,9 +540,9 @@ class VisualizerDialog(GlassDialog):
         self.canvas = ImageCanvas()
         self.style = Segmented([("wave", "Waveform"), ("bars", "Bars"), ("still", "Still image")], "wave")
         self.size = Segmented([(k, k) for k in media.VISUALIZER_SIZES], "Square")
-        waves = Swatches([(c, color_icon(c)) for c in ("#FFFFFF", "#FFCC00", "#34D399", "#06B6D4", "#F472B6",
+        waves = Swatches([(c, c) for c in ("#FFFFFF", "#FFCC00", "#34D399", "#06B6D4", "#F472B6",
                                                        "#7C5CFF", "#111114")], "#FFFFFF")
-        backs = Swatches([(c, color_icon(c)) for c in ("#16161D", "#0F2027", "#3F6FE0", "#7A4FD8", "#F4D35E",
+        backs = Swatches([(c, c) for c in ("#16161D", "#0F2027", "#3F6FE0", "#7A4FD8", "#F4D35E",
                                                        "#FFFFFF")], "#16161D")
         pick = QPushButton("Image…")
         pick.clicked.connect(self._pick)

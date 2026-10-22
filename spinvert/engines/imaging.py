@@ -11,7 +11,7 @@ import math
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFilter, ImageOps
 
 # ---------------------------------------------------------------- edit photos
 
@@ -195,14 +195,74 @@ def _rounded_mask(size, radius: float) -> Image.Image:
     return mask
 
 
-def add_background(im: Image.Image, opts: dict) -> Image.Image:
-    """opts: background {kind: gradient|solid|image|blur, ...}, padding, corners and
-    shadow (per-mille of the photo's long side / 0-100), ratio (a RATIOS key)."""
-    photo = im.convert("RGBA")
-    pw, ph = photo.size
-    unit = max(pw, ph) / 1000
+def _arrange(pictures: list[Image.Image], layout: str, gap_unit: float):
+    """Place several pictures: in a row (same height), a column (same width) or a grid."""
+    import statistics
+
+    if layout == "Column":
+        width = int(statistics.median(p.width for p in pictures))
+        sized = [p.resize((width, max(1, round(p.height * width / p.width))), Image.Resampling.LANCZOS)
+                 for p in pictures]
+        gap = gap_unit * width / 1000
+        y, spots = 0.0, []
+        for s in sized:
+            spots.append((s, (0.0, y)))
+            y += s.height + gap
+        return spots, (width, y - gap)
+    if layout == "Grid":
+        cols = math.ceil(math.sqrt(len(pictures)))
+        cell = int(statistics.median(max(p.width, p.height) for p in pictures))
+        gap = gap_unit * cell / 1000
+        spots = []
+        for i, p in enumerate(pictures):
+            k = cell / max(p.size)
+            s = p.resize((max(1, round(p.width * k)), max(1, round(p.height * k))), Image.Resampling.LANCZOS)
+            r, c = divmod(i, cols)
+            spots.append((s, (c * (cell + gap) + (cell - s.width) / 2, r * (cell + gap) + (cell - s.height) / 2)))
+        rows = math.ceil(len(pictures) / cols)
+        return spots, (cols * cell + (cols - 1) * gap, rows * cell + (rows - 1) * gap)
+    height = int(statistics.median(p.height for p in pictures))
+    sized = [p.resize((max(1, round(p.width * height / p.height)), height), Image.Resampling.LANCZOS)
+             for p in pictures]
+    gap = gap_unit * height / 1000
+    x, spots = 0.0, []
+    for s in sized:
+        spots.append((s, (x, 0.0)))
+        x += s.width + gap
+    return spots, (x - gap, height)
+
+
+def _background(bg: dict, size, photo: Image.Image, unit: float) -> Image.Image:
+    kind = bg.get("kind")
+    if kind == "solid":
+        canvas = Image.new("RGB", size, hex_rgb(bg.get("color", "#FFFFFF")))
+    elif kind == "image" and bg.get("path") and Path(bg["path"]).is_file():
+        canvas = ImageOps.fit(ImageOps.exif_transpose(Image.open(bg["path"])).convert("RGB"), size)
+    elif kind == "blur":
+        canvas = ImageOps.fit(photo.convert("RGB"), size)
+    else:
+        colors = bg.get("colors") or GRADIENTS.get(bg.get("name"), GRADIENTS["Aurora"])
+        canvas = gradient(size, colors, bg.get("angle", 135))
+    blur = bg.get("blur", 40 if kind == "blur" else 0)
+    if blur:
+        canvas = canvas.filter(ImageFilter.GaussianBlur(blur * unit * 0.6))
+    return canvas.convert("RGBA")
+
+
+def add_background(im, opts: dict) -> Image.Image:
+    """One picture, or several side by side, on a new background.
+
+    opts: background {kind: gradient (name, or colors and angle), solid, image
+    or blur}; padding, corners, spacing (thousandths of the group's long side)
+    and shadow (0-100); ratio (a RATIOS key); layout (Row, Column, Grid)."""
+    pictures = [p.convert("RGBA") for p in (im if isinstance(im, (list, tuple)) else [im])]
+    if len(pictures) > 1:
+        spots, (gw, gh) = _arrange(pictures, opts.get("layout", "Row"), opts.get("spacing", 40))
+    else:
+        spots, (gw, gh) = [(pictures[0], (0.0, 0.0))], pictures[0].size
+    unit = max(gw, gh) / 1000
     pad = opts.get("padding", 120) * unit
-    cw, chh = pw + 2 * pad, ph + 2 * pad
+    cw, chh = gw + 2 * pad, gh + 2 * pad
     ratio = RATIOS.get(opts.get("ratio", "Auto"))
     if ratio:
         rw, rh = ratio
@@ -211,37 +271,24 @@ def add_background(im: Image.Image, opts: dict) -> Image.Image:
         else:
             cw = chh * rw / rh
     canvas_size = (max(1, round(cw)), max(1, round(chh)))
-
-    bg = opts.get("background", {"kind": "gradient", "name": "Aurora"})
-    kind = bg.get("kind")
-    if kind == "solid":
-        canvas = Image.new("RGB", canvas_size, hex_rgb(bg.get("color", "#FFFFFF")))
-    elif kind == "image" and bg.get("path") and Path(bg["path"]).is_file():
-        canvas = ImageOps.fit(ImageOps.exif_transpose(Image.open(bg["path"])).convert("RGB"), canvas_size)
-    elif kind == "blur":
-        canvas = ImageOps.fit(photo.convert("RGB"), canvas_size)
-    else:
-        canvas = gradient(canvas_size, GRADIENTS.get(bg.get("name"), GRADIENTS["Aurora"]), bg.get("angle", 135))
-    blur = bg.get("blur", 40 if kind == "blur" else 0)
-    if blur:
-        canvas = canvas.filter(ImageFilter.GaussianBlur(blur * unit * 0.6))
-    canvas = canvas.convert("RGBA")
-
+    canvas = _background(opts.get("background", {"kind": "gradient", "name": "Aurora"}), canvas_size,
+                         pictures[0], unit)
+    ox, oy = (canvas_size[0] - gw) / 2, (canvas_size[1] - gh) / 2
     radius = opts.get("corners", 30) * unit
-    x, y = round((canvas_size[0] - pw) / 2), round((canvas_size[1] - ph) / 2)
     shadow = opts.get("shadow", 30)
     if shadow:
         spread = shadow * unit * 0.6
         layer = Image.new("L", canvas_size, 0)
-        layer.paste(_rounded_mask((pw, ph), radius), (x, y + round(spread * 0.35)))
+        for photo, (x, y) in spots:
+            layer.paste(_rounded_mask(photo.size, radius), (round(ox + x), round(oy + y + spread * 0.35)))
         layer = layer.filter(ImageFilter.GaussianBlur(max(1, spread)))
         darkness = Image.new("RGBA", canvas_size, (0, 0, 0, 0))
         darkness.putalpha(layer.point(lambda v: v * min(0.85, 0.3 + shadow / 140)))
         canvas.alpha_composite(darkness)
-    mask = _rounded_mask((pw, ph), radius)
-    if photo.mode == "RGBA":
+    for photo, (x, y) in spots:
+        mask = _rounded_mask(photo.size, radius)
         mask = Image.fromarray(np.minimum(np.asarray(mask), np.asarray(photo.getchannel("A"))))
-    canvas.paste(photo, (x, y), mask)
+        canvas.paste(photo, (round(ox + x), round(oy + y)), mask)
     return canvas
 
 
@@ -250,89 +297,8 @@ def add_background(im: Image.Image, opts: dict) -> Image.Image:
 PALETTE = ["#FF3B30", "#FF9500", "#FFCC00", "#34C759", "#0A84FF", "#7C5CFF", "#FFFFFF", "#111114"]
 
 
-def _font(size: float, bold: bool = True):
-    for name in (("segoeuib.ttf", "arialbd.ttf") if bold else ("segoeui.ttf", "arial.ttf")):
-        try:
-            return ImageFont.truetype(name, max(8, int(size)))
-        except OSError:
-            continue
-    return ImageFont.load_default()
-
-
-def _light(color) -> bool:
-    r, g, b = color[:3]
-    return 0.299 * r + 0.587 * g + 0.114 * b > 170
-
-
-def annotate(im: Image.Image, shapes: list[dict]) -> Image.Image:
-    """shapes: {type, points (fractions), color, width (per-mille), text}. Types:
-    arrow, rect, ellipse, line, pen, highlight, text, number, magnify."""
-    out = im.convert("RGBA")
-    W, H = out.size
-    unit = max(W, H) / 1000
-    number = 0
-    for shape in shapes:
-        pts = [(x * W, y * H) for x, y in shape.get("points", [])]
-        if not pts:
-            continue
-        kind = shape.get("type")
-        color = hex_rgb(shape.get("color", "#FF3B30")) + (255,)
-        width = max(1, round(shape.get("width", 6) * unit))
-        layer = Image.new("RGBA", out.size, (0, 0, 0, 0))
-        d = ImageDraw.Draw(layer)
-        a, b = pts[0], pts[-1]
-        box = (min(a[0], b[0]), min(a[1], b[1]), max(a[0], b[0]), max(a[1], b[1]))
-        if kind == "arrow":
-            d.line([a, b], fill=color, width=width)
-            ang = math.atan2(b[1] - a[1], b[0] - a[0])
-            head = width * 4.2
-            left = (b[0] - head * math.cos(ang - 0.45), b[1] - head * math.sin(ang - 0.45))
-            right = (b[0] - head * math.cos(ang + 0.45), b[1] - head * math.sin(ang + 0.45))
-            d.polygon([b, left, right], fill=color)
-        elif kind == "rect":
-            d.rounded_rectangle(box, radius=width * 1.5, outline=color, width=width)
-        elif kind == "ellipse":
-            d.ellipse(box, outline=color, width=width)
-        elif kind == "line":
-            d.line([a, b], fill=color, width=width)
-        elif kind in ("pen", "highlight"):
-            if kind == "highlight":
-                color = color[:3] + (110,)
-                width *= 4
-            if len(pts) == 1:
-                pts = pts * 2
-            d.line(pts, fill=color, width=width, joint="curve")
-            r = width / 2
-            for x, y in (pts[0], pts[-1]):
-                d.ellipse((x - r, y - r, x + r, y + r), fill=color)
-        elif kind == "text":
-            text = shape.get("text") or "Text"
-            font = _font(shape.get("size", 36) * unit)
-            l, t, r_, bt = d.textbbox(a, text, font=font)
-            pad = (bt - t) * 0.45
-            d.rounded_rectangle((l - pad, t - pad, r_ + pad, bt + pad), radius=pad * 1.4, fill=color)
-            d.text(a, text, font=font, fill=(17, 17, 20, 255) if _light(color) else (255, 255, 255, 255))
-        elif kind == "number":
-            number += 1
-            r = 22 * unit
-            d.ellipse((a[0] - r, a[1] - r, a[0] + r, a[1] + r), fill=color, outline=(255, 255, 255, 255),
-                      width=max(1, round(2.5 * unit)))
-            d.text(a, str(number), font=_font(r * 1.15), anchor="mm",
-                   fill=(17, 17, 20, 255) if _light(color) else (255, 255, 255, 255))
-        elif kind == "magnify":
-            r = max(10.0, math.dist(a, b))
-            region = out.crop((round(a[0] - r / 2), round(a[1] - r / 2), round(a[0] + r / 2), round(a[1] + r / 2)))
-            zoom = region.resize((round(2 * r), round(2 * r)), Image.Resampling.LANCZOS)
-            mask = Image.new("L", zoom.size, 0)
-            ImageDraw.Draw(mask).ellipse((0, 0, zoom.size[0] - 1, zoom.size[1] - 1), fill=255)
-            layer.paste(zoom, (round(a[0] - r), round(a[1] - r)), mask)
-            d.ellipse((a[0] - r, a[1] - r, a[0] + r, a[1] + r), outline=(255, 255, 255, 255), width=max(2, width // 2))
-        out.alpha_composite(layer)
-    return out
-
-
 def redact(im: Image.Image, areas: list[dict]) -> Image.Image:
-    """areas: {rect (fractions), style: blur|pixelate|solid, color}."""
+    """areas: {rect (fractions), style: blur|pixelate|solid, strength 1-100, color}."""
     out = im.convert("RGBA")
     W, H = out.size
     for area in areas:
@@ -342,15 +308,17 @@ def redact(im: Image.Image, areas: list[dict]) -> Image.Image:
             continue
         region = out.crop(box)
         style = area.get("style", "blur")
+        strength = max(1, min(100, area.get("strength", 60))) / 100
+        side = max(region.size)
         if style == "solid":
             region = Image.new("RGBA", region.size, hex_rgb(area.get("color", "#111114")) + (255,))
         elif style == "pixelate":
-            cells = max(1, max(region.size) // 14)
-            small = region.resize((max(1, region.size[0] // cells), max(1, region.size[1] // cells)),
+            cell = max(2, round(side * (0.015 + 0.15 * strength)))
+            small = region.resize((max(1, region.size[0] // cell), max(1, region.size[1] // cell)),
                                   Image.Resampling.BILINEAR)
             region = small.resize(region.size, Image.Resampling.NEAREST)
         else:
-            region = region.filter(ImageFilter.GaussianBlur(max(6, max(region.size) / 6)))
+            region = region.filter(ImageFilter.GaussianBlur(max(1.5, side * (0.02 + 0.22 * strength))))
         out.paste(region, box[:2])
     return out
 
@@ -379,14 +347,35 @@ def _cells(n: int, layout: str, w: float, h: float, gap: float):
     return grid(cols, rows, gap, gap, w - 2 * gap, h - 2 * gap)[:n]
 
 
+def _fill(im: Image.Image, size, focus=(0.5, 0.5), zoom: float = 1.0) -> Image.Image:
+    """Cover a cell: zoom in, then show the part around focus (fractions)."""
+    fx, fy = min(1.0, max(0.0, focus[0])), min(1.0, max(0.0, focus[1]))
+    if zoom > 1.0:
+        w, h = im.size
+        cw, ch = max(1, round(w / zoom)), max(1, round(h / zoom))
+        x, y = round((w - cw) * fx), round((h - ch) * fy)
+        im = im.crop((x, y, x + cw, y + ch))
+    return ImageOps.fit(im, size, Image.Resampling.LANCZOS, centering=(fx, fy))
+
+
+def collage_cells(n: int, opts: dict):
+    w, h = opts.get("size") or COLLAGE_SIZES["Square"]
+    gap = opts.get("spacing", 12) * max(w, h) / 1000
+    return _cells(n, opts.get("layout", "Grid"), w, h, gap)
+
+
 def collage(images: list[Image.Image], opts: dict) -> Image.Image:
+    """opts: layout, size, spacing, corners, background; focus [[x, y]] and zoom [z]
+    per picture choose which part of it shows in its cell."""
     w, h = opts.get("size") or COLLAGE_SIZES["Square"]
     unit = max(w, h) / 1000
-    gap = opts.get("spacing", 12) * unit
     radius = opts.get("corners", 16) * unit
     canvas = Image.new("RGB", (int(w), int(h)), hex_rgb(opts.get("background", "#FFFFFF")))
-    for im, (x, y, cw, ch) in zip(images, _cells(len(images), opts.get("layout", "Grid"), w, h, gap)):
+    focus = opts.get("focus") or []
+    zoom = opts.get("zoom") or []
+    for i, (im, (x, y, cw, ch)) in enumerate(zip(images, collage_cells(len(images), opts))):
         size = (max(1, round(cw)), max(1, round(ch)))
-        tile = ImageOps.fit(im.convert("RGB"), size, Image.Resampling.LANCZOS)
-        canvas.paste(tile, (round(x), round(y)), _rounded_mask(size, radius))
+        f = focus[i] if i < len(focus) else (0.5, 0.5)
+        z = zoom[i] if i < len(zoom) else 1.0
+        canvas.paste(_fill(im.convert("RGB"), size, f, z), (round(x), round(y)), _rounded_mask(size, radius))
     return canvas

@@ -249,10 +249,12 @@ def combine_to_pdf(ctx):
 # Photo tools. The settings come from the editors (spinvert.editors.photo);
 # without them (a quick run, or the test) each tool uses a sensible default.
 
-DEFAULT_SHAPES = [
-    {"type": "arrow", "points": [[0.15, 0.2], [0.42, 0.45]], "color": "#FF3B30", "width": 6},
-    {"type": "text", "points": [[0.5, 0.12]], "color": "#FFCC00", "text": "Look here", "size": 36},
-    {"type": "number", "points": [[0.75, 0.7]], "color": "#0A84FF"},
+DEFAULT_LAYERS = [
+    {"id": "a1", "type": "arrow", "points": [[0.15, 0.2], [0.42, 0.45]], "color": "#FF3B30", "width": 8},
+    {"id": "t1", "type": "text", "points": [[0.45, 0.1]], "color": "#FFFFFF", "text": "Look here • انظر هنا",
+     "size": 50, "bold": True, "bg": {"on": True, "color": "#7C5CFF", "opacity": 90, "padding": 35, "radius": 35},
+     "shadow": {"on": True, "color": "#000000", "opacity": 50, "blur": 4, "distance": 3}},
+    {"id": "n1", "type": "number", "points": [[0.75, 0.7]], "color": "#0A84FF", "size": 26, "number": 1},
 ]
 
 
@@ -284,7 +286,12 @@ def photo_tool(kind: str):
         elif kind == "background":
             result, suffix, alpha = imaging.add_background(im, p), "background", True
         elif kind == "annotate":
-            result, suffix = imaging.annotate(im, p.get("shapes", DEFAULT_SHAPES)), "annotated"
+            from spinvert import layers
+            from spinvert.mainthread import run_in_main
+
+            drawn = p.get("layers") or DEFAULT_LAYERS
+            result = layers.to_pil(run_in_main(lambda: layers.render(layers.from_pil(im), drawn)))
+            suffix = "annotated"
         elif kind == "redact":
             areas = p.get("areas") or [{"rect": (0.3, 0.3, 0.7, 0.7), "style": "blur"}]
             result, suffix = imaging.redact(im, areas), "redacted"
@@ -295,6 +302,24 @@ def photo_tool(kind: str):
         save_still(result, out, ext, ctx.settings.image_quality)
         return [out]
     return run
+
+
+def background_group(ctx):
+    """Several pictures side by side on one background."""
+    from spinvert.engines import imaging
+
+    order = ctx.params.get("order")
+    files = [ctx.inputs[i] for i in order] if order else sorted(ctx.inputs, key=natural_key)
+    pictures = []
+    for i, path in enumerate(files):
+        ctx.check()
+        pictures.append(_upright(_open(path)))
+        ctx.progress(0.5 * (i + 1) / len(files))
+    result = imaging.add_background(pictures, ctx.params)
+    ext = ctx.params.get("format", "png")
+    out = ctx.output(f"{files[0].stem} and {len(files) - 1} more (background)", ext)
+    save_still(result, out, ext, ctx.settings.image_quality)
+    return [out]
 
 
 def make_collage(ctx):

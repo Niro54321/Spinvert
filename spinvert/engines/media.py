@@ -389,37 +389,114 @@ def normalize_audio(ctx):
 
 
 def trim(ctx):
-    """Keep start..end. Audio can fade in and out."""
+    """Keep start..end, at a chosen speed. Video can also get text and picture
+    layers and extra sound tracks (see edit_video); audio can fade in and out."""
     src = ctx.inputs[0]
     info_ = probe(ctx, src)
+    if info_["video"]:
+        return edit_video(ctx, info_)
+    _need(info_, "audio", src)
     p = ctx.params
+    start, end, length = _span(p, info_)
+    speed = float(p.get("speed", 1) or 1)
+    chain = _fades(p, length) + ([_tempo(speed, info_, p)] if speed != 1 else [])
+    ext = audio_ext(src)
+    out = ctx.output(f"{src.stem} (trimmed)", ext)
+    args = ["-map", "0:a:0", "-vn", *(["-af", ",".join(chain)] if chain else []), *AUDIO_CODEC[ext]]
+    ffmpeg(ctx, src, out, args, length / speed, pre=["-ss", f"{start:.3f}", "-t", f"{length:.3f}"])
+    return [out]
+
+
+def _span(p: dict, info_: dict):
+    duration = info_["duration"] or 1e9
     start = max(0.0, float(p.get("start", 0)))
-    end = min(info_["duration"] or 1e9, float(p.get("end", min(info_["duration"], start + 5) or 5)))
+    end = min(duration, float(p.get("end", min(duration, start + 5))))
     if end - start < 0.05:
         raise ConversionError("The selection is empty.")
-    length = end - start
+    return start, end, end - start
+
+
+def _fades(p: dict, length: float) -> list:
+    chain = []
     fade_in, fade_out = float(p.get("fade_in", 0)), float(p.get("fade_out", 0))
-    fades = []
     if fade_in > 0:
-        fades.append(f"afade=t=in:st=0:d={fade_in:.3f}")
+        chain.append(f"afade=t=in:st=0:d={fade_in:.3f}")
     if fade_out > 0:
-        fades.append(f"afade=t=out:st={max(0, length - fade_out):.3f}:d={fade_out:.3f}")
+        chain.append(f"afade=t=out:st={max(0, length - fade_out):.3f}:d={fade_out:.3f}")
+    return chain
+
+
+def _tempo(speed: float, info_: dict, p: dict) -> str:
+    rate = info_["rate"] or 48000
+    return _atempo(speed) if p.get("keep_pitch", True) else f"asetrate={rate * speed:.0f},aresample={rate}"
+
+
+def edit_video(ctx, info_=None):
+    """Trim, change speed, draw text and picture layers (each for its own time
+    range) and mix in extra sound tracks, in one pass."""
+    import tempfile as _tempfile
+
+    src = ctx.inputs[0]
+    info_ = info_ or probe(ctx, src)
+    _need(info_, "video", src)
+    p = ctx.params
+    start, end, length = _span(p, info_)
+    speed = float(p.get("speed", 1) or 1)
+    layers = [x for x in p.get("layers") or [] if x.get("type") not in (None, "audio")]
+    tracks = [x for x in p.get("tracks") or [] if x.get("path") and Path(x["path"]).is_file()]
+    mute = bool(p.get("mute_original"))
+    ext = _tool_ext(src)
+    out = ctx.output(f"{src.stem} ({'edited' if layers or tracks or speed != 1 else 'trimmed'})", ext)
     pre = ["-ss", f"{start:.3f}", "-t", f"{length:.3f}"]
-    if info_["video"]:
-        ext = ext_of(src)
-        out = ctx.output(f"{src.stem} (trimmed)", ext)
-        if p.get("fast"):
-            args = ["-map", "0:v:0", "-map", "0:a:0?", "-c", "copy"]
-        else:
-            args = ["-map", "0:v:0", "-map", "0:a:0?", "-vf", EVEN, *_encode(ext, ctx.settings)]
-            if fades:
-                args += ["-af", ",".join(fades)]
-    else:
-        _need(info_, "audio", src)
-        ext = audio_ext(src)
-        out = ctx.output(f"{src.stem} (trimmed)", ext)
-        args = ["-map", "0:a:0", "-vn", *(["-af", ",".join(fades)] if fades else []), *AUDIO_CODEC[ext]]
-    ffmpeg(ctx, src, out, args, length, pre=pre)
+    if p.get("fast") and not (layers or tracks or mute or speed != 1):
+        ffmpeg(ctx, src, out, ["-map", "0:v:0", "-map", "0:a:0?", "-c", "copy"], length, pre=pre)
+        return [out]
+    W, H = info_["width"] // 2 * 2, info_["height"] // 2 * 2
+    with _tempfile.TemporaryDirectory(prefix="spinvert-") as tmp:
+        inputs, graph = [], [f"[0:v]scale={W}:{H},setsar=1[v0]"]
+        index, last = 1, "v0"
+        if layers:
+            from spinvert import layers as L
+            from spinvert.mainthread import run_in_main
+
+            for n, layer in enumerate(layers):
+                png = Path(tmp) / f"layer{n}.png"
+                run_in_main(lambda layer=layer, png=png: L.render_alone(W, H, [layer]).save(str(png)))
+                a = max(0.0, float(layer.get("start", 0)) - start)
+                b = min(length, float(layer.get("end", 1e9)) - start)
+                if b <= a:
+                    continue
+                inputs += ["-loop", "1", "-t", f"{length:.3f}", "-i", png]
+                graph.append(f"[{last}][{index}:v]overlay=0:0:enable='between(t,{a:.3f},{b:.3f})'[v{index}]")
+                last = f"v{index}"
+                index += 1
+        graph.append(f"[{last}]setpts=PTS/{speed},format=yuv420p[vout]")
+        mix = []
+        if info_["audio"] and not mute:
+            graph.append("[0:a]aresample=48000,aformat=channel_layouts=stereo[a0]")
+            mix.append("[a0]")
+        for n, track in enumerate(tracks):
+            delay = max(0.0, float(track.get("at", start)) - start)
+            inputs += ["-i", track["path"]]
+            volume = float(track.get("volume", 100)) / 100
+            graph.append(f"[{index}:a]aresample=48000,aformat=channel_layouts=stereo,"
+                         f"adelay=delays={int(delay * 1000)}:all=1,volume={volume:.3f}[t{n}]")
+            mix.append(f"[t{n}]")
+            index += 1
+        audio_map = []
+        if mix:
+            chain = (f"{''.join(mix)}amix=inputs={len(mix)}:duration=longest:normalize=0,"
+                     if len(mix) > 1 else f"{mix[0]}anull,")
+            chain += f"atrim=0:{length:.3f}"
+            for f in _fades(p, length):
+                chain += "," + f
+            if speed != 1:
+                chain += "," + _tempo(speed, info_, p)
+            graph.append(chain + "[aout]")
+            audio_map = ["-map", "[aout]", *_audio_for(ext)]
+        args = ["-filter_complex", ";".join(graph), "-map", "[vout]", *audio_map,
+                *_video_only(ext, ctx.settings), "-t", f"{length / speed:.3f}"]
+        ffmpeg(ctx, src, out, args, length / speed, pre=pre, inputs=inputs)
     return [out]
 
 
@@ -433,23 +510,67 @@ def _box(rect, width: int, height: int):
 
 
 def crop_video(ctx):
-    """Reframe: keep a rectangle (e.g. 9:16 for Reels), optionally at an exact size."""
+    """Reframe for Reels, square, 4:5... Either crop to fill the new shape, or fit
+    the whole picture on a background: the video itself blurred, a colour, a
+    gradient or an image."""
     src = ctx.inputs[0]
     info_ = probe(ctx, src)
     _need(info_, "video", src)
     p = ctx.params
+    ext = _tool_ext(src)
+    out = ctx.output(f"{src.stem} ({'fitted' if p.get('mode') == 'fit' else 'cropped'})", ext)
+    size = p.get("size")
+    if p.get("mode") == "fit":
+        W, H = (int(size[0]) // 2 * 2, int(size[1]) // 2 * 2) if size else (1080, 1920)
+        ffmpeg(ctx, src, out, [*_fit_graph(ctx, p, W, H, info_), "-map", "0:a:0?",
+                               *_video_only(ext, ctx.settings), *_keep_audio(ext, info_)], info_["duration"],
+               inputs=_fit_inputs(ctx, p, W, H))
+        return [out]
     rect = p.get("rect") or _centered(info_["width"], info_["height"], 9 / 16)
     x, y, w, h = _box(rect, info_["width"], info_["height"])
     vf = f"crop={w}:{h}:{x}:{y}"
-    size = p.get("size")
     if size:
         vf += f",scale={int(size[0]) // 2 * 2}:{int(size[1]) // 2 * 2}:flags=lanczos"
     vf += ",setsar=1"
-    ext = _tool_ext(src)
-    out = ctx.output(f"{src.stem} (cropped)", ext)
     ffmpeg(ctx, src, out, ["-map", "0:v:0", "-map", "0:a:0?", "-vf", vf, *_video_only(ext, ctx.settings),
                            *_keep_audio(ext, info_)], info_["duration"])
     return [out]
+
+
+def _fit_inputs(ctx, p: dict, W: int, H: int) -> list:
+    """A background picture input for gradient and image backgrounds."""
+    bg = p.get("background", {"kind": "blur"})
+    if bg.get("kind") in ("gradient", "image"):
+        from spinvert.engines import imaging
+
+        picture = imaging._background(bg, (W, H), None, max(W, H) / 1000) if bg.get("kind") == "gradient" \
+            else None
+        path = Path(tempfile.gettempdir()) / f"spinvert-bg-{W}x{H}.png"
+        if picture is not None:
+            picture.convert("RGB").save(path)
+        elif bg.get("path"):
+            from PIL import Image, ImageOps
+
+            ImageOps.fit(ImageOps.exif_transpose(Image.open(bg["path"])).convert("RGB"), (W, H)).save(path)
+        return ["-loop", "1", "-i", path]
+    return []
+
+
+def _fit_graph(ctx, p: dict, W: int, H: int, info_: dict) -> list:
+    bg = p.get("background", {"kind": "blur"})
+    kind = bg.get("kind", "blur")
+    fg = f"[0:v]scale={W}:{H}:force_original_aspect_ratio=decrease,setsar=1[fg]"
+    if kind == "blur":
+        strength = max(4, int(bg.get("blur", 40) * min(W, H) / 1000))
+        back = (f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"
+                f"boxblur=luma_radius={min(strength, min(W, H) // 4 - 1)}:luma_power=3,setsar=1[bg]")
+    elif kind == "solid":
+        color = bg.get("color", "#000000").lstrip("#")
+        back = f"color=c=0x{color}:s={W}x{H}:r={info_['fps'] or 30:.3f}[bg]"
+    else:
+        back = f"[1:v]scale={W}:{H},setsar=1,fps={info_['fps'] or 30:.3f}[bg]"
+    graph = f"{back};{fg};[bg][fg]overlay=(W-w)/2:(H-h)/2:shortest=1,format=yuv420p[v]"
+    return ["-filter_complex", graph, "-map", "[v]"]
 
 
 def _x264(ctx) -> list:
@@ -606,11 +727,20 @@ def join_media(ctx):
         args = ["-filter_complex", ";".join(graph), "-map", "[v]", "-map", "[a]",
                 *_x264(ctx), "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]
     elif not any(i["video"] for i in infos):
+        gap = max(0.0, float(ctx.params.get("gap", 0)))
         for f in files:
             inputs += ["-i", f]
+        parts = []
         for n in range(len(files)):
             graph.append(f"[{n}:a]aformat=sample_rates=48000:channel_layouts=stereo[a{n}]")
-        graph.append("".join(f"[a{n}]" for n in range(len(files))) + f"concat=n={len(files)}:v=0:a=1[a]")
+            parts.append(f"[a{n}]")
+            if gap and n < len(files) - 1:  # silence between files
+                inputs += ["-f", "lavfi", "-t", f"{gap:.3f}", "-i", "anullsrc=r=48000:cl=stereo"]
+                silence = len(files) + n
+                graph.append(f"[{silence}:a]anull[g{n}]")
+                parts.append(f"[g{n}]")
+        total += gap * (len(files) - 1)
+        graph.append("".join(parts) + f"concat=n={len(parts)}:v=0:a=1[a]")
         ext = audio_ext(files[0])
         out = ctx.output("Joined", ext, folder=files[0].parent)
         args = ["-filter_complex", ";".join(graph), "-map", "[a]", *AUDIO_CODEC[ext]]
@@ -634,15 +764,17 @@ def redact_video(ctx):
         start, end = float(area.get("start", 0)), float(area.get("end", info_["duration"] or 1e9))
         when = f"between(t,{start:.3f},{end:.3f})"
         style = area.get("style", "blur")
+        strength = max(1, min(100, area.get("strength", 60))) / 100
         if style == "solid":
             color = area.get("color", "#000000").lstrip("#")
             graph.append(f"[{current}]drawbox=x={x}:y={y}:w={w}:h={h}:color=0x{color}@1:t=fill:"
                          f"enable='{when}'[s{n}]")
         else:
             if style == "pixelate":
-                effect = f"scale={max(2, w // 16)}:{max(2, h // 16)},scale={w}:{h}:flags=neighbor"
+                cell = max(2, round(max(w, h) * (0.015 + 0.15 * strength)))
+                effect = f"scale={max(1, w // cell)}:{max(1, h // cell)},scale={w}:{h}:flags=neighbor"
             else:
-                radius = max(1, min(40, min(w, h) // 4 - 1))
+                radius = max(1, min(min(w, h) // 4 - 1, round(max(w, h) * (0.02 + 0.22 * strength))))
                 effect = f"boxblur=luma_radius={radius}:luma_power=3"
             graph.append(f"[{current}]split[b{n}][t{n}];[t{n}]crop={w}:{h}:{x}:{y},{effect}[e{n}];"
                          f"[b{n}][e{n}]overlay={x}:{y}:enable='{when}'[s{n}]")

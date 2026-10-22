@@ -157,7 +157,9 @@ _tool("metadata", "Metadata", "image video audio pdf", metadata.write, prepare=F
                         + EXTENSIONS["video"].split() + ["pdf"]) - {"svg", "bmp", "gif"})
 _tool("edit", "Edit", "image", images.photo_tool("edit"), prepare=PHOTO + "edit_photo", in_exts=STILL)
 _tool("annotate", "Annotate", "image", images.photo_tool("annotate"), max_items=1,
-      prepare=PHOTO + "annotate", in_exts=STILL)
+      prepare="spinvert.editors.annotate:annotate", in_exts=STILL)
+_tool("background", "Add BG", "image", images.background_group, combine=True, min_items=2,
+      prepare=PHOTO + "add_background", in_exts=STILL)  # several pictures side by side
 _tool("background", "Add BG", "image", images.photo_tool("background"), prepare=PHOTO + "add_background",
       in_exts=STILL)
 _tool("crop", "Crop", "image", images.photo_tool("crop"), prepare=PHOTO + "crop_photo", in_exts=STILL)
@@ -238,7 +240,10 @@ def choices_for(items: list[Path], wheel: str, engines: dict) -> list[Choice]:
                         and all(_fits(op, p, c) for p, c in zip(items, cats))), None)
             if fit:
                 result.append(Choice(key, fit.label, wheel, [(fit, list(items))], icon=fit.icon))
-            continue
+                continue
+            ops = [op for op in ops if not op.combine]  # e.g. Add BG for one picture
+            if not ops:
+                continue
         plan, skipped, ok = [], 0, True
         for path, cat in zip(items, cats):
             op = next((o for o in ops if _fits(o, path, cat)), None)
