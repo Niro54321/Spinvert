@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import getpass
 import importlib
 import json
@@ -205,6 +206,9 @@ def main() -> int:
         print("Spinvert runs on Windows.")
         return 1
     args = sys.argv[1:]
+    # Our own app ID, so the taskbar shows Spinvert's icon instead of grouping
+    # the window under pythonw.exe with Python's logo.
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Niro54321.Spinvert")
     app = QApplication(sys.argv[:1])
     app.setApplicationName(APP_NAME)
     app.setQuitOnLastWindowClosed(False)
