@@ -79,6 +79,9 @@ Word, documents still convert to PDF with Spinvert's own writer.
 - To spot the drag, Spinvert checks the state of the mouse button and of
   Shift, Ctrl, Alt and Esc a few dozen times a second. It does not record
   keystrokes and installs no keyboard hooks.
+- For the glass look, Spinvert keeps a snapshot of the screen behind the wheel
+  (taken when you press the mouse in File Explorer) and behind its own window.
+  It stays in memory, is replaced at the next press, and is never saved or sent.
 
 ## Roadmap
 
