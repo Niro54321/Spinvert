@@ -6,8 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from spinvert.engines import (archives, documents, images, media, pages, pdfs, sheets, slides,
-                              subtitles)
+from spinvert.engines import (archives, documents, images, media, metadata, ocr, pages, pdfs, sheets,
+                              slides, subtitles)
 from spinvert.util import ext_of, normal_ext
 
 EXTENSIONS = {
@@ -46,7 +46,8 @@ class Op:
     target: str | None = None     # skip files that are already in this format
     needs: tuple = ()             # engines: ffmpeg, pandoc, word, powerpoint, excel
     in_exts: frozenset | None = None
-    prepare: str | None = None    # "module:function" asked in the UI before the job
+    prepare: str | None = None    # "module:function": an editor asked before the job
+    icon: str = ""                # a Segoe Fluent Icons glyph, shown on the tools wheel
 
 
 @dataclass
@@ -56,6 +57,9 @@ class Choice:
     wheel: str
     plan: list = field(default_factory=list)   # [(Op, [paths]), ...]
     skipped: int = 0
+    icon: str = ""
+    ask: str | None = None        # "module:function" asked once before the plan runs
+    alternative: Op | None = None  # what `ask` can switch to (e.g. one PDF for all images)
 
 
 OPS: list[Op] = []
@@ -122,21 +126,73 @@ for kind, label in [("zip", "ZIP"), ("tar", "TAR"), ("tar.gz", "GZIP")]:
     _add(kind, label, "convert", "archive", archives.repack(kind), target=kind)
     _add(kind, label, "convert", "folder", archives.folder_to(kind))
 
-# Tools wheel.
+# Tools wheel. Each tool has an icon from Segoe Fluent Icons (built into
+# Windows 11) and, when it needs settings, an editor (`prepare`). The order
+# here is the order around the wheel for each kind of file.
 
-_add("compress", "Compress", "tools", "image", images.compress)
-_add("compress", "Compress", "tools", "video", media.compress_video, needs=("ffmpeg",))
-_add("compress", "Compress", "tools", "pdf", pdfs.compress)
-_add("to-pdf", "Combine to PDF", "tools", "image", images.combine_to_pdf, combine=True)
-_add("merge", "Merge", "tools", "pdf", pdfs.merge, combine=True, min_items=2)
-_add("split", "Split pages", "tools", "pdf", pdfs.split)
-_add("reorder", "Reorder", "tools", "pdf", pdfs.reorder, max_items=1,
-     prepare="spinvert.dialogs:ask_page_order")
-_add("clean", "Remove metadata", "tools", "image", images.strip_metadata,
-     in_exts=frozenset(EXTENSIONS["image"].split()) - {"svg"})
-_add("normalize", "Normalize volume", "tools", "audio", media.normalize_audio, needs=("ffmpeg",))
-_add("mute", "Remove sound", "tools", "video", media.remove_audio, needs=("ffmpeg",))
-_add("zip", "ZIP all", "tools", ANY, archives.zip_all, combine=True)
+ICON = {k: chr(v) for k, v in {
+    "compress": 0xE73F, "metadata": 0xE8EC, "edit": 0xE9E9, "annotate": 0xE70F, "background": 0xE91B,
+    "crop": 0xE7A8, "resize": 0xE740, "redact": 0xED1A, "text": 0xE8D2, "collage": 0xF0E2,
+    "pdf": 0xEA90, "mute": 0xE74F, "trim": 0xE8C6, "speed": 0xEC4A, "frames": 0xE722,
+    "split": 0xE89F, "join": 0xE71B, "normalize": 0xE995, "visualize": 0xE9D9, "channels": 0xE7F5,
+    "bleep": 0xE7BA, "organize": 0xE8A9, "merge": 0xE8C8, "password": 0xE72E, "zip": 0xF012,
+}.items()}
+FF = ("ffmpeg",)
+PHOTO = "spinvert.editors.photo:"
+AV = "spinvert.editors.av:"
+FILES = "spinvert.editors.files:"
+STILL = frozenset(EXTENSIONS["image"].split()) - {"gif"}
+
+
+def _tool(key, label, cats, func, **kw):
+    _add(key, label, "tools", cats, func, icon=ICON.get(key, ""), **kw)
+
+
+_tool("compress", "Compress", "image", images.compress, prepare=FILES + "ask_compress")
+_tool("compress", "Compress", "video", media.compress_video, needs=FF, prepare=FILES + "ask_compress")
+_tool("compress", "Compress", "audio", media.compress_audio, needs=FF, prepare=FILES + "ask_compress")
+_tool("compress", "Compress", "pdf", pdfs.compress)
+_tool("metadata", "Metadata", "image video audio pdf", metadata.write, prepare=FILES + "edit_metadata",
+      in_exts=frozenset(EXTENSIONS["image"].split() + EXTENSIONS["audio"].split()
+                        + EXTENSIONS["video"].split() + ["pdf"]) - {"svg", "bmp", "gif"})
+_tool("edit", "Edit", "image", images.photo_tool("edit"), prepare=PHOTO + "edit_photo", in_exts=STILL)
+_tool("annotate", "Annotate", "image", images.photo_tool("annotate"), max_items=1,
+      prepare=PHOTO + "annotate", in_exts=STILL)
+_tool("background", "Add BG", "image", images.photo_tool("background"), prepare=PHOTO + "add_background",
+      in_exts=STILL)
+_tool("crop", "Crop", "image", images.photo_tool("crop"), prepare=PHOTO + "crop_photo", in_exts=STILL)
+_tool("resize", "Resize", "image", images.photo_tool("resize"), prepare=PHOTO + "resize_photo",
+      in_exts=STILL)
+_tool("redact", "Redact", "image", images.photo_tool("redact"), max_items=1, prepare=PHOTO + "redact",
+      in_exts=STILL)
+_tool("text", "Text", "image pdf", ocr.extract_text, in_exts=STILL | {"pdf"})
+_tool("collage", "Collage", "image", images.make_collage, combine=True, min_items=2,
+      prepare=PHOTO + "make_collage")
+_tool("to-pdf", "To PDF", "image", images.combine_to_pdf, combine=True, min_items=2,
+      prepare=FILES + "order_files")
+
+_tool("mute", "Mute", "video", media.remove_audio, needs=FF)
+_tool("normalize", "Normalize", "audio", media.normalize_audio, needs=FF, prepare=AV + "normalize")
+_tool("visualize", "Visualize", "audio", media.visualize, needs=FF, prepare=AV + "visualizer")
+_tool("trim", "Trim", "video audio", media.trim, needs=FF, max_items=1, prepare=AV + "trim")
+_tool("crop", "Crop", "video", media.crop_video, needs=FF, prepare=AV + "crop_video")
+_tool("channels", "Channels", "audio", media.channels, needs=FF, prepare=AV + "channels")
+_tool("bleep", "Bleep", "audio", media.bleep, needs=FF, max_items=1, prepare=AV + "bleep")
+_tool("speed", "Speed", "video audio", media.change_speed, needs=FF, prepare=AV + "speed")
+_tool("frames", "Frames", "video", media.save_frames, needs=FF, max_items=1, prepare=AV + "frames")
+_tool("split", "Split", "video audio", media.split_media, needs=FF, max_items=1, prepare=AV + "split")
+_tool("split", "Split", "pdf", pdfs.split, prepare=FILES + "split_pdf")
+_tool("redact", "Redact", "video", media.redact_video, needs=FF, max_items=1, prepare=AV + "redact_video")
+for kind in ("video", "audio"):  # all videos, or all audio; not a mix
+    _tool("join", "Join", kind, media.join_media, needs=FF, combine=True, min_items=2,
+          prepare=FILES + "order_files")
+
+_tool("organize", "Organize", "pdf", pdfs.organize, max_items=1, prepare=FILES + "organize_pdf")
+_tool("password", "Password", "pdf", pdfs.password, prepare=FILES + "pdf_password")
+_tool("merge", "Merge", "pdf", pdfs.merge, combine=True, min_items=2, prepare=FILES + "order_files")
+_tool("zip", "ZIP", ANY, archives.zip_all, combine=True)
+
+IMAGES_TO_ONE_PDF = next(op for op in OPS if op.key == "to-pdf")
 
 
 def detect_engines(settings) -> dict:
@@ -176,11 +232,12 @@ def choices_for(items: list[Path], wheel: str, engines: dict) -> list[Choice]:
     result = []
     for key in keys:
         ops = [op for op in usable if op.key == key]
-        combined = next((op for op in ops if op.combine), None)
-        if combined:
-            if (len(items) >= combined.min_items
-                    and all(_fits(combined, p, c) for p, c in zip(items, cats))):
-                result.append(Choice(key, combined.label, wheel, [(combined, list(items))]))
+        combos = [op for op in ops if op.combine]
+        if combos:
+            fit = next((op for op in combos if len(items) >= op.min_items
+                        and all(_fits(op, p, c) for p, c in zip(items, cats))), None)
+            if fit:
+                result.append(Choice(key, fit.label, wheel, [(fit, list(items))], icon=fit.icon))
             continue
         plan, skipped, ok = [], 0, True
         for path, cat in zip(items, cats):
@@ -194,5 +251,10 @@ def choices_for(items: list[Path], wheel: str, engines: dict) -> list[Choice]:
             plan.append((op, [path]))
         max_items = max((o.max_items or 0 for o in ops), default=0)
         if ok and plan and (not max_items or len(items) <= max_items):
-            result.append(Choice(key, ops[0].label, wheel, plan, skipped))
+            choice = Choice(key, ops[0].label, wheel, plan, skipped, icon=ops[0].icon)
+            if key == "pdf" and len(plan) > 1 and all(c == "image" for c in cats):
+                # Several pictures to PDF: one PDF each, or all in one? Asked when chosen.
+                choice.ask = FILES + "ask_pdf_mode"
+                choice.alternative = IMAGES_TO_ONE_PDF
+            result.append(choice)
     return result

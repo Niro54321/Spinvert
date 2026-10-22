@@ -1,16 +1,11 @@
-"""Dialogs: settings, and the page order for "Reorder"."""
+"""The settings window."""
 
 from __future__ import annotations
 
-from io import BytesIO
-from pathlib import Path
-
-from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QGuiApplication, QIcon, QPainter, QPixmap
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
-                               QFormLayout, QHBoxLayout, QLabel, QLineEdit, QListView,
-                               QListWidget, QListWidgetItem, QMessageBox, QPushButton, QSlider,
-                               QVBoxLayout)
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QGuiApplication, QPainter
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QHBoxLayout,
+                               QLabel, QLineEdit, QMessageBox, QPushButton, QSlider, QVBoxLayout)
 
 from spinvert import system
 from spinvert.glassui import MARGIN, GlassFrame
@@ -22,78 +17,6 @@ KEY_LABELS = {"shift": "Shift", "ctrl": "Ctrl", "alt": "Alt"}
 QUALITY_LABELS = {"high": "High (bigger files)", "balanced": "Balanced", "small": "Small files"}
 ENGINE_LABELS = [("ffmpeg", "FFmpeg"), ("pandoc", "Pandoc"), ("word", "Word"),
                  ("powerpoint", "PowerPoint"), ("excel", "Excel")]
-
-
-class ReorderDialog(QDialog):
-    def __init__(self, path: Path, parent=None):
-        super().__init__(parent)
-        from spinvert.engines.pdfs import thumbnails
-
-        self.setWindowTitle(f"Reorder pages: {path.name}")
-        self.setWindowIcon(app_icon())
-        self.resize(820, 560)
-        self.list = QListWidget()
-        self.list.setViewMode(QListView.ViewMode.IconMode)
-        self.list.setIconSize(QSize(130, 180))
-        self.list.setGridSize(QSize(160, 230))
-        self.list.setResizeMode(QListView.ResizeMode.Adjust)
-        self.list.setMovement(QListView.Movement.Snap)
-        self.list.setDragDropMode(QListWidget.DragDropMode.InternalMove)
-        self.list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
-        for i, image in enumerate(thumbnails(path)):
-            buf = BytesIO()
-            image.convert("RGB").save(buf, "PNG")
-            pm = QPixmap()
-            pm.loadFromData(buf.getvalue())
-            item = QListWidgetItem(QIcon(pm), f"Page {i + 1}")
-            item.setData(Qt.ItemDataRole.UserRole, i)
-            self.list.addItem(item)
-
-        hint = QLabel("Drag pages into the new order. Select pages and press Remove to leave them out.")
-        hint.setWordWrap(True)
-        reverse = QPushButton("Reverse")
-        reverse.clicked.connect(self._reverse)
-        remove = QPushButton("Remove")
-        remove.clicked.connect(self._remove)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save
-                                   | QDialogButtonBox.StandardButton.Cancel)
-        buttons.button(QDialogButtonBox.StandardButton.Save).setText("Save a copy")
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        row = QHBoxLayout()
-        row.addWidget(reverse)
-        row.addWidget(remove)
-        row.addStretch()
-        row.addWidget(buttons)
-        layout = QVBoxLayout(self)
-        layout.addWidget(hint)
-        layout.addWidget(self.list)
-        layout.addLayout(row)
-
-    def _reverse(self):
-        items = [self.list.takeItem(0) for _ in range(self.list.count())]
-        for item in reversed(items):
-            self.list.addItem(item)
-
-    def _remove(self):
-        for item in self.list.selectedItems():
-            self.list.takeItem(self.list.row(item))
-
-    def order(self) -> list[int]:
-        return [self.list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.list.count())]
-
-
-def ask_page_order(inputs: list[Path], parent=None):
-    """prepare hook for the Reorder tool: returns params, or None to cancel."""
-    dialog = ReorderDialog(inputs[0], parent)
-    dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
-    if dialog.exec() != QDialog.DialogCode.Accepted:
-        return None
-    order = dialog.order()
-    if not order:
-        QMessageBox.information(parent, "Spinvert", "No pages left, so nothing was saved.")
-        return None
-    return {"order": order}
 
 
 class SettingsDialog(QDialog):

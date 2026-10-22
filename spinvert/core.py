@@ -75,11 +75,11 @@ class Context:
     # external programs
 
     def run(self, cmd: list, on_line: Callable[[str], None] | None = None,
-            capture: bool = False, cwd: Path | None = None) -> str:
+            capture: bool = False, cwd: Path | None = None, stderr: bool = False) -> str:
         """Run a program without a console window. Kills it on cancel.
 
-        Returns stdout when capture is set. Raises ConversionError with the
-        last line of stderr when the program fails.
+        Returns stdout when capture is set, stderr when stderr is set. Raises
+        ConversionError with the last line of stderr when the program fails.
         """
         self.check()
         lines: list[str] = []
@@ -111,6 +111,9 @@ class Context:
                 text = err.read().decode("utf-8", "replace").strip().splitlines()
                 last = text[-1].strip() if text else f"exit code {proc.returncode}"
                 raise ConversionError(last[:300])
+            if stderr:
+                err.seek(0)
+                return err.read().decode("utf-8", "replace")
         return "".join(lines)
 
 

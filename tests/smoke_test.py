@@ -292,11 +292,8 @@ def main() -> int:
     failures = 0
     for name, choice in jobs:
         for op, inputs in choice.plan:
-            params = {}
-            if op.prepare:
-                from spinvert.engines.pdfs import page_count
-                params = {"order": list(reversed(range(page_count(inputs[0]))))}
-            ctx = Context(inputs=inputs, settings=settings, engines=engines, params=params)
+            # Tools with an editor run here with no settings, so each uses its default.
+            ctx = Context(inputs=inputs, settings=settings, engines=engines, params={})
             started = time.perf_counter()
             label = f"{name[:38]:38} {choice.wheel:7} {choice.label:16}"
             try:
@@ -304,7 +301,8 @@ def main() -> int:
                 info = "; ".join(check_output(o, ffprobe) for o in outputs)
                 print(f"OK    {label} {time.perf_counter() - started:5.1f}s  {info}")
             except ConversionError as e:
-                expected = any(s in str(e) for s in ("Already compact", "only one page", "No text found"))
+                expected = any(s in str(e) for s in ("Already compact", "only one page", "No text found",
+                                                     "Type a password", "no sound", "too small"))
                 tag = "NOTE " if expected else "FAIL "
                 failures += 0 if expected else 1
                 print(f"{tag} {label} {e}")

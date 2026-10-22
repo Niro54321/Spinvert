@@ -313,7 +313,7 @@ class Wheel(QWidget):
             p.setPen(thin_pen(look.segment_edge, 1))
             p.setBrush(look.segment)
             p.drawPath(path)
-            self._label(p, choice.label, box, False, n, look)
+            self._label(p, choice.label, box, False, n, look, choice.icon)
         self._hub(p, c, ACCENT[self.mode], look)
         p.end()
         return pm
@@ -342,7 +342,8 @@ class Wheel(QWidget):
             p.setPen(thin_pen(ACCENT[self.mode], 1.6))
             p.setBrush(self.look.hover)
             p.drawPath(path)
-            self._label(p, self.choices[self.hover].label, box, True, len(self.choices), self.look)
+            choice = self.choices[self.hover]
+            self._label(p, choice.label, box, True, len(self.choices), self.look, choice.icon)
         p.end()
 
     def _shadow(self, p, c, look):
@@ -387,7 +388,22 @@ class Wheel(QWidget):
         p.setPen(thin_pen(look.outline, 1))
         p.drawEllipse(c, radius + 0.5, radius + 0.5)
 
-    def _label(self, p, text, rect, hovered, n, look):
+    def _label(self, p, text, rect, hovered, n, look, icon=""):
+        if icon:  # tools: an icon over a small capitalised name
+            color = look.hover_text if hovered else look.text
+            shadow = NO_SHADOW if hovered else look.text_shadow
+            glyph = QFont("Segoe Fluent Icons")
+            glyph.setPixelSize(21 if n <= 8 else 18)
+            p.setFont(glyph)
+            soft_text(p, QRectF(rect.left(), rect.top() - 4, rect.width(), 26), icon, color, shadow)
+            font = QFont(self.font())
+            font.setPixelSize(10 if n <= 8 else 9)
+            font.setWeight(QFont.Weight.Bold)
+            font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.5)
+            p.setFont(font)
+            soft_text(p, QRectF(rect.left() - 6, rect.top() + 24, rect.width() + 12, 16), text.upper(), color,
+                      shadow)
+            return
         font = QFont(self.font())
         size = 15 if n <= 7 else 13 if n <= 10 else 11
         if len(text) > 8:

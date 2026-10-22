@@ -289,7 +289,8 @@ def pdf_to_pptx(ctx):
 
 
 def merge(ctx):
-    files = sorted(ctx.inputs, key=natural_key)
+    order = ctx.params.get("order")
+    files = [ctx.inputs[i] for i in order] if order else sorted(ctx.inputs, key=natural_key)
     writer = PdfWriter()
     for i, path in enumerate(files):
         ctx.check()
@@ -301,21 +302,52 @@ def merge(ctx):
     return [out]
 
 
+def parse_ranges(text: str, count: int) -> list[list[int]]:
+    """'1-3, 5, 8-' to [[0,1,2],[4],[7..count-1]] (page indexes)."""
+    groups = []
+    for part in re.split(r"[,;\s]+", text.strip()):
+        if not part:
+            continue
+        a, dash, b = part.partition("-")
+        try:
+            first = int(a) if a else 1
+            last = (int(b) if b else count) if dash else first
+        except ValueError as e:
+            raise ConversionError(f"Can't read the page range '{part}'.") from e
+        first, last = max(1, first), min(count, last)
+        if first <= last:
+            groups.append(list(range(first - 1, last)))
+    if not groups:
+        raise ConversionError("No pages in those ranges.")
+    return groups
+
+
 def split(ctx):
+    """Every page, every N pages, or custom ranges like '1-3, 4-7, 8-'."""
     src = ctx.inputs[0]
     reader = _reader(src)
     count = len(reader.pages)
-    if count < 2:
+    p = ctx.params
+    mode = p.get("mode", "each")
+    if mode == "every":
+        n = max(1, int(p.get("every", 2)))
+        groups = [list(range(i, min(count, i + n))) for i in range(0, count, n)]
+    elif mode == "ranges":
+        groups = parse_ranges(p.get("ranges", ""), count)
+    else:
+        groups = [[i] for i in range(count)]
+    if len(groups) < 2 and mode != "ranges":
         raise ConversionError("This PDF has only one page.")
     folder = ctx.output_dir(f"{src.stem} split")
-    digits = len(str(count))
-    for i, page in enumerate(reader.pages):
+    for n, group in enumerate(groups, 1):
         ctx.check()
         writer = PdfWriter()
-        writer.add_page(page)
-        with open(folder / f"{src.stem}-p{i + 1:0{digits}d}.pdf", "wb") as fh:
+        for i in group:
+            writer.add_page(reader.pages[i])
+        name = f"p{group[0] + 1}" if len(group) == 1 else f"p{group[0] + 1}-{group[-1] + 1}"
+        with open(folder / f"{src.stem} {name}.pdf", "wb") as fh:
             writer.write(fh)
-        ctx.progress((i + 1) / count)
+        ctx.progress(n / len(groups))
     return [folder]
 
 
@@ -323,16 +355,47 @@ def page_count(path: Path) -> int:
     return len(_reader(path).pages)
 
 
-def reorder(ctx):
+def organize(ctx):
+    """pages: [[index, rotation], ...] in the new order; repeats duplicate a page."""
     src = ctx.inputs[0]
-    order = ctx.params.get("order")
     reader = _reader(src)
-    if not order or any(i < 0 or i >= len(reader.pages) for i in order):
-        raise ConversionError("No page order was given.")
+    pages = ctx.params.get("pages") or [[i, 0] for i in reversed(range(len(reader.pages)))]
+    if any(i < 0 or i >= len(reader.pages) for i, _ in pages):
+        raise ConversionError("The page list doesn't match this PDF.")
     writer = PdfWriter()
-    for i in order:
-        writer.add_page(reader.pages[i])
-    out = ctx.output(f"{src.stem} (reordered)", "pdf")
+    for i, rotation in pages:
+        page = writer.add_page(reader.pages[i])
+        if rotation % 360:
+            page.rotate(rotation % 360)
+    out = ctx.output(f"{src.stem} (organized)", "pdf")
+    with open(out, "wb") as fh:
+        writer.write(fh)
+    return [out]
+
+
+def is_locked(path: Path) -> bool:
+    try:
+        return PdfReader(str(path)).is_encrypted
+    except Exception:
+        return False
+
+
+def password(ctx):
+    """Lock with a password (AES-256), or unlock a PDF whose password you know."""
+    src = ctx.inputs[0]
+    secret = ctx.params.get("password", "")
+    reader = PdfReader(str(src))
+    if reader.is_encrypted:
+        if not reader.decrypt(secret):
+            raise ConversionError("Wrong password.")
+        writer = PdfWriter(clone_from=reader)
+        out = ctx.output(f"{src.stem} (unlocked)", "pdf")
+    else:
+        if not secret:
+            raise ConversionError("Type a password first.")
+        writer = PdfWriter(clone_from=reader)
+        writer.encrypt(user_password=secret, owner_password=None, algorithm="AES-256")
+        out = ctx.output(f"{src.stem} (locked)", "pdf")
     with open(out, "wb") as fh:
         writer.write(fh)
     return [out]

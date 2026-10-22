@@ -123,17 +123,43 @@ class Controller(QObject):
         if paths:
             self.wheel.open_click(paths, "convert", QCursor.pos())
 
+    def _ask(self, spec: str, paths):
+        """Open an editor ("module:function"); its settings, or None if cancelled."""
+        module, func = spec.split(":")
+        try:
+            return getattr(importlib.import_module(module), func)(paths, None)
+        except Exception as e:
+            self.tray.showMessage(APP_NAME, f"Couldn't open the editor: {e}"[:200],
+                                  QSystemTrayIcon.MessageIcon.Warning, 6000)
+            return None
+
+    def _submit(self, op, inputs, params, label):
+        job_id = self.jobs.submit(op, inputs, params)
+        name = inputs[0].name if len(inputs) == 1 else f"{len(inputs)} files"
+        self.progress.add_job(job_id, f"{name}  →  {label}")
+
     def run_choice(self, choice):
+        everything = [p for _, inputs in choice.plan for p in inputs]
+        if choice.ask:
+            answer = self._ask(choice.ask, everything)
+            if answer is None:
+                return
+            mode, params = answer
+            if mode == "combine":
+                self._submit(choice.alternative, everything, params or {}, choice.alternative.label)
+                return
+        # Each editor opens once; its settings apply to every file it covers.
+        settings = {}
         for op, inputs in choice.plan:
             params = {}
             if op.prepare:
-                module, func = op.prepare.split(":")
-                params = getattr(importlib.import_module(module), func)(inputs, None)
+                if op.prepare not in settings:
+                    group = [p for o, ins in choice.plan if o.prepare == op.prepare for p in ins]
+                    settings[op.prepare] = self._ask(op.prepare, group)
+                params = settings[op.prepare]
                 if params is None:
                     continue
-            job_id = self.jobs.submit(op, inputs, params)
-            name = inputs[0].name if len(inputs) == 1 else f"{len(inputs)} files"
-            self.progress.add_job(job_id, f"{name}  →  {choice.label}")
+            self._submit(op, inputs, params, choice.label)
 
     def _job_finished(self, job_id, outputs, error):
         if error and error != "cancelled":

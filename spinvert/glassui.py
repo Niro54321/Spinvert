@@ -56,6 +56,8 @@ def style_sheet(look) -> str:
     groove = "rgba(255,255,255,0.22)" if dark else "rgba(0,0,0,0.12)"
     track = "rgba(255,255,255,0.85)" if dark else "rgba(22,22,30,0.75)"
     arrow = icons["arrow-light" if dark else "arrow-dark"]
+    card = "rgba(255,255,255,0.07)" if dark else "rgba(255,255,255,0.42)"
+    card_edge = "rgba(255,255,255,0.18)" if dark else "rgba(0,0,0,0.08)"
     return f"""
         QLabel, QCheckBox {{ color: {fg}; background: transparent; font-size: 13px; }}
         QPushButton {{ color: {fg}; background: {fill}; border: 1px solid {edge};
@@ -83,6 +85,29 @@ def style_sheet(look) -> str:
         QSlider::handle:horizontal {{ width: 18px; height: 18px; margin: -6px 0; border-radius: 9px;
                                       background: white; border: 1px solid rgba(0,0,0,0.2); }}
         QToolTip {{ color: white; background: #262634; border: 1px solid rgba(255,255,255,0.2); }}
+        QPushButton[segment="true"] {{ padding: 5px 13px; border-radius: 13px; font-weight: 600; }}
+        QPushButton[segment="true"]:checked {{ color: {primary_fg}; background: {primary_bg};
+                                               border: 1px solid {primary_bg}; }}
+        QPushButton[swatch="true"] {{ padding: 0; border-radius: 13px; border: 2px solid {edge}; }}
+        QPushButton[swatch="true"]:checked {{ border: 3px solid #7C5CFF; }}
+        QWidget[card="true"] {{ background: {card}; border: 1px solid {card_edge}; border-radius: 16px; }}
+        QScrollArea, QScrollArea > QWidget > QWidget {{ background: transparent; border: none; }}
+        QListWidget, QTableWidget {{ color: {fg}; background: {fill}; border: 1px solid {edge};
+                                     border-radius: 12px; padding: 4px; outline: none; }}
+        QListWidget::item:selected, QTableWidget::item:selected {{ background: rgba(124,92,255,0.55);
+                                                                   color: white; border-radius: 6px; }}
+        QHeaderView::section {{ color: {fg}; background: transparent; border: none; font-weight: 700;
+                                padding: 4px; }}
+        QTableWidget {{ gridline-color: transparent; }}
+        QSpinBox, QDoubleSpinBox {{ color: {fg}; background: {fill}; border: 1px solid {edge};
+                                    border-radius: 12px; padding: 4px 8px; min-height: 20px; }}
+        QSpinBox::up-button, QSpinBox::down-button, QDoubleSpinBox::up-button,
+        QDoubleSpinBox::down-button {{ width: 0; border: none; }}
+        QScrollBar:vertical {{ width: 8px; background: transparent; margin: 2px; }}
+        QScrollBar::handle:vertical {{ background: {groove}; border-radius: 4px; min-height: 30px; }}
+        QScrollBar:horizontal {{ height: 8px; background: transparent; margin: 2px; }}
+        QScrollBar::handle:horizontal {{ background: {groove}; border-radius: 4px; min-width: 30px; }}
+        QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
     """
 
 
