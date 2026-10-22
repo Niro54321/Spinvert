@@ -17,7 +17,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QEasingCurve, QPointF, QRectF, Qt, QTimer, QVariantAnimation, Signal
 from PySide6.QtGui import (QBrush, QColor, QCursor, QFont, QFontMetrics, QGuiApplication,
-                           QLinearGradient, QPainter, QPainterPath, QPen, QRadialGradient)
+                           QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient)
 from PySide6.QtWidgets import QApplication, QWidget
 
 from spinvert import glass
@@ -58,6 +58,8 @@ class Wheel(QWidget):
         self.hover = None
         self.backdrop = None
         self.look = ON_DARK
+        self._base = None
+        self._shapes, self._shapes_n = [], -1
         self.t = 1.0
         self.anim = QVariantAnimation(self)
         self.anim.setDuration(160)
@@ -76,6 +78,7 @@ class Wheel(QWidget):
     def open_drag(self, mode: str, pos) -> None:
         self.drag_mode, self.dropped, self.pending = True, False, True
         self.items, self.choices, self.hover, self.mode = [], [], None, mode
+        self._base = None
         self._show_at(pos)
 
     def open_click(self, items: list[Path], mode: str, pos) -> None:
@@ -94,6 +97,7 @@ class Wheel(QWidget):
         self.anim.stop()
         self.hide()
         self.items, self.choices, self.hover = [], [], None
+        self._base = None
 
     def close_if_no_drop(self) -> None:
         if self.isVisible() and self.drag_mode and not self.dropped:
@@ -119,7 +123,7 @@ class Wheel(QWidget):
 
     def set_backdrop(self, image) -> None:
         """Frost a screenshot of what is behind the wheel. None: plain dark glass."""
-        self.backdrop, self.look = None, ON_DARK
+        self.backdrop, self.look, self._base = None, ON_DARK, None
         if image is not None:
             try:
                 self.backdrop, brightness = glass.frost(image, SIZE)
@@ -134,6 +138,7 @@ class Wheel(QWidget):
     def _recompute(self) -> None:
         self.choices = choices_for(self.items, self.mode, self.controller.engines) if self.items else []
         self.hover = None
+        self._base = None
 
     # geometry
 
@@ -180,9 +185,12 @@ class Wheel(QWidget):
 
     def _drag_hover(self, event):
         seg = self._segment_at(event.position())
-        self.hover = seg
-        self.update()
-        if isinstance(seg, int):
+        if seg != self.hover:
+            self.hover = seg
+            self.update()
+        # Accept over the hub too, so no "not allowed" cursor shows inside the
+        # wheel. A drop on the hub just closes it.
+        if seg is not None:
             event.setDropAction(Qt.DropAction.CopyAction)
             event.accept()
         else:
@@ -210,7 +218,10 @@ class Wheel(QWidget):
     def mouseMoveEvent(self, event):
         seg = self._segment_at(event.position())
         if seg != self.hover:
+            hub_changed = (seg == "hub") != (self.hover == "hub")
             self.hover = seg
+            if hub_changed:
+                self._base = None  # the hub's own hover look is in the cached layer
             self.update()
 
     def mousePressEvent(self, event):
@@ -226,6 +237,8 @@ class Wheel(QWidget):
 
     def leaveEvent(self, event):
         if not self.drag_mode and self.hover is not None:
+            if self.hover == "hub":
+                self._base = None
             self.hover = None
             self.update()
 
@@ -239,49 +252,84 @@ class Wheel(QWidget):
 
     # painting
 
-    def paintEvent(self, event):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
-        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        c = self._center()
-        look = self.look
-        p.setPen(Qt.PenStyle.NoPen)
-        # Nearly invisible, so the whole disc catches the drop, gaps included.
-        p.setBrush(QColor(0, 0, 0, 2))
-        p.drawEllipse(c, R_OUT + 12, R_OUT + 12)
+    # The glass, the idle segments and the hub are drawn once into a cached
+    # pixmap. A mouse move then only paints the highlighted segment on top.
 
-        p.setOpacity(self.t)
-        self._shadow(p, c, look)
-        scale = 0.9 + 0.1 * self.t
-        p.translate(c)
-        p.scale(scale, scale)
-        p.translate(-c)
+    def _invalidate(self) -> None:
+        self._base = None
+        self.update()
 
-        disc = QPainterPath()
-        disc.addEllipse(c, R_OUT, R_OUT)
-        self._glass(p, disc, c, look, zoom=1.035, tint=look.tint)
-        self._rim(p, c, R_OUT, look)
-
+    def _segments(self):
+        """(shape, label box) per segment, rebuilt only when the count changes."""
         n = len(self.choices)
-        accent = ACCENT[self.mode]
-        if n:
-            span = 360 / n
+        if self._shapes_n != n:
+            c = self._center()
+            span = 360 / n if n else 0
             mid = (R_IN + R_OUT) / 2
-            for i, choice in enumerate(self.choices):
+            shapes = []
+            for i in range(n):
                 angle = 90 - i * span
                 if n == 1:
                     path = annulus(c, R_IN + 6, R_OUT - 8)
                 else:
                     path = pill_segment(c, R_IN + 6, R_OUT - 8, angle, span, GAP, ROUND)
-                hovered = i == self.hover
-                p.setPen(thin_pen(accent if hovered else look.segment_edge, 1.6 if hovered else 1))
-                p.setBrush(look.hover if hovered else look.segment)
-                p.drawPath(path)
                 a = math.radians(angle if n > 1 else 90)
                 x, y = c.x() + mid * math.cos(a), c.y() - mid * math.sin(a)
-                self._label(p, choice.label, QRectF(x - 50, y - 22, 100, 44), hovered, n, look)
-        self._hub(p, c, accent, look)
+                shapes.append((path, QRectF(x - 50, y - 22, 100, 44)))
+            self._shapes, self._shapes_n = shapes, n
+        return self._shapes
+
+    def _build_base(self) -> QPixmap:
+        dpr = self.devicePixelRatioF()
+        pm = QPixmap(round(SIZE * dpr), round(SIZE * dpr))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        c = self._center()
+        look = self.look
+        self._shadow(p, c, look)
+        disc = QPainterPath()
+        disc.addEllipse(c, R_OUT, R_OUT)
+        self._glass(p, disc, c, look, zoom=1.035, tint=look.tint)
+        self._rim(p, c, R_OUT, look)
+        n = len(self.choices)
+        for choice, (path, box) in zip(self.choices, self._segments()):
+            p.setPen(thin_pen(look.segment_edge, 1))
+            p.setBrush(look.segment)
+            p.drawPath(path)
+            self._label(p, choice.label, box, False, n, look)
+        self._hub(p, c, ACCENT[self.mode], look)
+        p.end()
+        return pm
+
+    def paintEvent(self, event):
+        if self._base is None:
+            self._base = self._build_base()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        c = self._center()
+        # Nearly invisible, so the whole disc catches the drop from the first frame.
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(0, 0, 0, 2))
+        p.drawEllipse(c, R_OUT + 12, R_OUT + 12)
+        if self.t < 1.0:
+            p.setOpacity(self.t)
+            scale = 0.9 + 0.1 * self.t
+            p.translate(c)
+            p.scale(scale, scale)
+            p.translate(-c)
+        p.drawPixmap(0, 0, self._base)
+        if isinstance(self.hover, int) and self.hover < len(self.choices):
+            path, box = self._segments()[self.hover]
+            p.setPen(thin_pen(ACCENT[self.mode], 1.6))
+            p.setBrush(self.look.hover)
+            p.drawPath(path)
+            self._label(p, self.choices[self.hover].label, box, True, len(self.choices), self.look)
         p.end()
 
     def _shadow(self, p, c, look):
