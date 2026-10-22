@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (QCheckBox, QFileDialog, QHBoxLayout, QPushButton,
                                QVBoxLayout, QWidget)
 
 from spinvert.editors.base import (Background, BoxesTool, CropTool, GlassDialog, ImageCanvas, Segmented,
-                                   SliderRow, busy, card, label, preview_copy, to_qimage)
+                                   SidePanel, SliderRow, busy, card, label, preview_copy, split, to_qimage)
 from spinvert.editors.pickers import Swatches
 from spinvert.engines import imaging
 from spinvert.engines.images import _open, _upright
@@ -46,12 +46,7 @@ def _side_panel(width: int = 330) -> tuple[QScrollArea, QVBoxLayout]:
     lay = QVBoxLayout(inner)
     lay.setContentsMargins(14, 14, 14, 14)
     lay.setSpacing(8)
-    scroll = QScrollArea()
-    scroll.setWidgetResizable(True)
-    scroll.setWidget(inner)
-    scroll.setFixedWidth(width)
-    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-    return scroll, lay
+    return SidePanel(inner), lay
 
 
 # ------------------------------------------------------------------ edit
@@ -82,10 +77,7 @@ class EditDialog(GlassDialog):
                 self.sliders[key] = row
                 lay.addWidget(row)
         lay.addStretch()
-        main = QHBoxLayout()
-        main.addWidget(self.canvas, 1)
-        main.addWidget(panel)
-        self.body.addLayout(main, 1)
+        self.body.addWidget(split(self.canvas, panel), 1)
         compare = QPushButton("Hold to compare")
         compare.pressed.connect(lambda: self.canvas.set_image(to_qimage(self.original)))
         compare.released.connect(self._render)
@@ -157,10 +149,7 @@ class CropDialog(GlassDialog):
         self.info = label("", muted=True)
         lay.addWidget(self.info)
         lay.addStretch()
-        main = QHBoxLayout()
-        main.addWidget(self.canvas, 1)
-        main.addWidget(panel)
-        self.body.addLayout(main, 1)
+        self.body.addWidget(split(self.canvas, panel), 1)
         self.footer_left.addWidget(label(_many(paths), muted=True))
         self._show()
 
@@ -345,10 +334,7 @@ class BackgroundDialog(GlassDialog):
         self.ratio.changed.connect(self.render_soon)
         lay.addWidget(self.ratio)
         lay.addStretch()
-        main = QHBoxLayout()
-        main.addWidget(self.canvas, 1)
-        main.addWidget(panel)
-        self.body.addLayout(main, 1)
+        self.body.addWidget(split(self.canvas, panel), 1)
         if len(paths) > 1:
             self.footer_left.addWidget(label("All pictures become one image, in File Explorer's order.", muted=True))
         self._render()
@@ -580,10 +566,7 @@ class CollageDialog(GlassDialog):
         for s in (self.spacing, self.corners):
             s.changed.connect(self.render_soon)
         lay.addStretch()
-        main = QHBoxLayout()
-        main.addWidget(self.canvas, 1)
-        main.addWidget(panel)
-        self.body.addLayout(main, 1)
+        self.body.addWidget(split(self.canvas, panel), 1)
         self.footer_left.addWidget(label("Drag inside a picture to choose the part that shows; "
                                          "scroll to zoom it.", muted=True))
         self._render()

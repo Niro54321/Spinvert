@@ -53,6 +53,11 @@ class Controller(QObject):
         self._told_running = False
         self._build_tray()
         self.watcher.start()
+        from spinvert.capture import Hotkey
+
+        self.hotkey = Hotkey(self.take_screenshot)
+        app.installNativeEventFilter(self.hotkey)
+        self.snipper = None
 
     def _take_snapshot(self, x: int, y: int):
         """The screen at the mouse press that may start a drag, before Explorer's
@@ -70,6 +75,7 @@ class Controller(QObject):
                              f"{KEY_NAMES[self.settings.convert_key]}")
         menu = QMenu()
         for text, slot in [("Open Spinvert", self.show_drop_window),
+                           ("Take a screenshot\tCtrl+Alt+S", self.take_screenshot),
                            ("Settings…", self.show_settings),
                            ("Show progress", self.progress.show)]:
             action = QAction(text, menu)
@@ -95,6 +101,34 @@ class Controller(QObject):
         self.drop_window.show()
         self.drop_window.raise_()
         self.drop_window.activateWindow()
+
+    # screenshots
+
+    def take_screenshot(self):
+        if self.snipper is not None and self.snipper.overlays:
+            return  # already choosing an area
+        self.wheel.close_wheel()
+        hidden = self.drop_window.isVisible()
+        if hidden:
+            self.drop_window.hide()  # keep Spinvert's own window out of the picture
+        QTimer.singleShot(250 if hidden else 0, self._snip)
+
+    def _snip(self):
+        from spinvert.capture import Snipper
+
+        self.snipper = Snipper(self._edit_screenshot)
+        self.snipper.start()
+
+    def _edit_screenshot(self, image):
+        from spinvert.editors.annotate import edit_screenshot
+
+        result = edit_screenshot(image)
+        if not result:
+            return
+        kind, path = result
+        text = ("Screenshot copied. Paste it anywhere with Ctrl+V." if kind == "copied"
+                else f"Screenshot saved: {Path(path).name}")
+        self.tray.showMessage(APP_NAME, text, app_icon(), 3500)
 
     def show_settings(self):
         from spinvert.dialogs import SettingsDialog
@@ -181,6 +215,7 @@ class Controller(QObject):
             self.tray.showMessage(APP_NAME, text, app_icon(), 3000)
 
     def quit(self):
+        self.hotkey.unregister()
         self.watcher.stop()
         self.jobs.shutdown()
         self.tray.hide()

@@ -13,7 +13,7 @@ from PySide6.QtCore import QObject, Qt, QUrl, Signal  # noqa: E402
 from PySide6.QtGui import QImage, QKeySequence, QShortcut  # noqa: E402
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget  # noqa: E402
 
-from spinvert.editors.base import Segmented, fmt_time  # noqa: E402
+from spinvert.editors.base import FlowLayout, Segmented, fmt_time, wrap  # noqa: E402
 
 
 class Player(QObject):
@@ -94,9 +94,7 @@ class TransportBar(QWidget):
     def __init__(self, player: Player, duration: float, window: QWidget, speeds=True):
         super().__init__()
         self.player, self.duration = player, duration
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(6)
+        lay = FlowLayout(self, 14)  # the speeds move under the buttons in a narrow window
         self.back = QPushButton("« 10 s")
         self.back.setToolTip("Back 10 seconds (←)")
         self.play = QPushButton()
@@ -112,19 +110,20 @@ class TransportBar(QWidget):
         self.back.clicked.connect(lambda: player.skip(-10))
         self.forward.clicked.connect(lambda: player.skip(10))
         self.play.clicked.connect(player.toggle)
-        lay.addWidget(self.back)
-        lay.addWidget(self.play)
-        lay.addWidget(self.forward)
-        lay.addWidget(self.time)
-        lay.addStretch()
+        controls = QHBoxLayout()
+        for w in (self.back, self.play, self.forward, self.time):
+            controls.addWidget(w)
+        lay.addWidget(wrap(controls))
         if speeds:
-            lay.addWidget(QLabel("Preview speed"))
             self.speed = Segmented([("0.5", "0.5×"), ("1", "1×"), ("1.5", "1.5×"), ("2", "2×"), ("3", "3×"),
                                     ("4", "4×")], "1")
             self.speed.changed.connect(lambda k: player.set_rate(float(k)))
             for b in self.speed.buttons.values():
                 b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            lay.addWidget(self.speed)
+            rate = QHBoxLayout()
+            rate.addWidget(QLabel("Preview speed"))
+            rate.addWidget(self.speed)
+            lay.addWidget(wrap(rate))
         player.playing.connect(self._state)
         player.position.connect(self._time)
         self._state(False)

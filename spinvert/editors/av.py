@@ -19,9 +19,10 @@ from PySide6.QtWidgets import (QCheckBox, QDoubleSpinBox, QFileDialog, QHBoxLayo
 
 from spinvert import layers as L
 from spinvert.editors.annotate import LayerCanvas, LayerList, Properties, side_panel
-from spinvert.editors.base import (Background, BoxesTool, CropTool, GlassDialog, ImageCanvas, Segmented,
+from spinvert.editors.base import (Background, BoxesTool, CropTool, FlowLayout, GlassDialog, ImageCanvas, Segmented,
                                    SliderRow, TimeEdit, Timeline, busy, fmt_time, label, play_wav,
-                                   qimage_from_png, stop_sound, to_qimage)
+                                   qimage_from_png, stop_sound, to_qimage, wrap)
+from spinvert.editors.base import split as side_by_side
 from spinvert.editors.pickers import Swatches
 from spinvert.editors.player import Player, TransportBar
 from spinvert.engines import imaging, media
@@ -164,18 +165,17 @@ def _range_row(dialog, timeline: Timeline, with_frames: bool):
     dialog.start_edit.changed.connect(lambda v: set_range(v, None))
     dialog.end_edit.changed.connect(lambda v: set_range(None, v))
     timeline.changed.connect(sync)
-    row = QHBoxLayout()
-    row.addWidget(label("Start"))
-    row.addWidget(dialog.start_edit)
-    row.addWidget(label("End"))
-    row.addWidget(dialog.end_edit)
-    row.addWidget(dialog.length)
-    row.addStretch()
+    fields = QHBoxLayout()
+    for w in (label("Start"), dialog.start_edit, label("End"), dialog.end_edit, dialog.length):
+        fields.addWidget(w)
+    row = FlowLayout()  # wraps onto a second line in a narrow window
+    row.addWidget(wrap(fields))
     if with_frames:
-        row.addLayout(_buttons(("◀ Frame", lambda: dialog.step_frame(-1)), ("Frame ▶", lambda: dialog.step_frame(1))))
-    row.addLayout(_buttons(("Start here", lambda: set_range(dialog.now(), None)),
-                           ("End here", lambda: set_range(None, dialog.now())),
-                           ("▶ Selection", lambda: dialog.player.play_range(timeline.start, timeline.end))))
+        row.addWidget(wrap(_buttons(("◀ Frame", lambda: dialog.step_frame(-1)),
+                                    ("Frame ▶", lambda: dialog.step_frame(1)))))
+    row.addWidget(wrap(_buttons(("Start here", lambda: set_range(dialog.now(), None)),
+                                ("End here", lambda: set_range(None, dialog.now())),
+                                ("▶ Selection", lambda: dialog.player.play_range(timeline.start, timeline.end)))))
     sync()
     dialog.set_range = set_range
     return row
@@ -238,7 +238,6 @@ class VideoEditDialog(MediaDialog):
                        self.track_volume, self.mute)
         right = _panel(_save_options(self, True), self.layer_time, self.props, sound)
         # layout
-        middle = QHBoxLayout()
         left = QVBoxLayout()
         left.addWidget(self.canvas, 1)
         left.addWidget(self.transport)
@@ -250,9 +249,7 @@ class VideoEditDialog(MediaDialog):
         layers_row.addWidget(self.layer_list, 1)
         layers_row.addLayout(_buttons(("Delete", self.canvas.delete)))
         left.addLayout(layers_row)
-        middle.addLayout(left, 1)
-        middle.addWidget(side_panel(right, 340))
-        self.body.addLayout(middle, 1)
+        self.body.addWidget(side_by_side(wrap(left), side_panel(right, 340), 340), 1)
         self.footer_left.addWidget(label("Space plays or pauses, ← → jump 10 s. Text and pictures can be "
                                          "dragged on the video.", muted=True))
 
@@ -443,10 +440,9 @@ class VideoCropDialog(MediaDialog):
         left.addWidget(self.presets)
         left.addWidget(self.mode)
         left.addLayout(size_row)
-        main = QHBoxLayout()
-        main.addLayout(left, 1)
-        main.addWidget(side_panel(self.bg_panel, 330))
-        self.body.addLayout(main, 1)
+        self.side = side_panel(self.bg_panel, 330)
+        self.side.setVisible(False)  # only "Fit, with a background" has settings there
+        self.body.addWidget(side_by_side(wrap(left), self.side, 330), 1)
         self.footer_left.addWidget(label(f"Original {self.info['width']} × {self.info['height']}. "
                                          "The sound is kept.", muted=True))
         self._preset("9:16")
@@ -477,6 +473,7 @@ class VideoCropDialog(MediaDialog):
     def _mode(self, key):
         fit = key == "fit"
         self.bg_panel.setVisible(fit)
+        self.side.setVisible(fit)
         self.screen.set_tool(None if fit else self.tool)
         self.effect = self._fit_preview if fit else None
         self.refresh_frame()

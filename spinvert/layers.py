@@ -20,7 +20,7 @@ from PySide6.QtGui import (QColor, QFont, QFontMetricsF, QImage, QPainter, QPain
 
 NAMES = {"arrow": "Arrow", "line": "Line", "rect": "Box", "ellipse": "Circle", "pen": "Pen",
          "highlight": "Highlight", "text": "Text", "number": "Number", "magnify": "Magnifier",
-         "image": "Picture"}
+         "image": "Picture", "blur": "Blur"}
 
 TEXT_DEFAULTS = {"font": "Segoe UI", "size": 55, "bold": True, "italic": False, "align": "auto",
                  "bg": {"on": False, "color": "#111114", "opacity": 85, "padding": 35, "radius": 35},
@@ -38,6 +38,8 @@ def new(kind: str, **fields) -> dict:
         layer.update(zoom=2.0, color="#FFFFFF")
     elif kind == "highlight":
         layer.update(color="#FFCC00", width=8)
+    elif kind == "blur":
+        layer.update(style="blur", strength=60)
     layer.update(copy.deepcopy(fields))
     return layer
 
@@ -305,6 +307,8 @@ def paint(p: QPainter, layer: dict, W: float, H: float, source: QImage | None = 
         p.setPen(QColor("#16161D") if _light(color) else QColor("white"))
         p.drawText(QRectF(a.x() - r, a.y() - r, 2 * r, 2 * r), Qt.AlignmentFlag.AlignCenter,
                    str(layer.get("number", 1)))
+    elif kind == "blur" and source is not None and not source.isNull():
+        _blur(p, layer, QRectF(a, b).normalized(), source, W, H)
     elif kind == "magnify" and source is not None and not source.isNull():
         r = layer.get("radius", 0.12) * W
         zoom = max(1.1, layer.get("zoom", 2.0))
@@ -329,6 +333,28 @@ def paint(p: QPainter, layer: dict, W: float, H: float, source: QImage | None = 
     elif kind == "text" and layer.get("text"):
         _text(p, layer, W, H)
     p.restore()
+
+
+def _blur(p: QPainter, layer: dict, r: QRectF, source: QImage, W, H):
+    """Blur or pixelate the picture under a box: shrink that part, then stretch
+    it back (smoothly for blur, in blocks for pixelate)."""
+    if r.width() < 2 or r.height() < 2:
+        return
+    sx, sy = source.width() / W, source.height() / H
+    part = source.copy(QRectF(r.x() * sx, r.y() * sy, r.width() * sx, r.height() * sy).toRect())
+    if part.isNull():
+        return
+    strength = max(1, min(100, layer.get("strength", 60))) / 100
+    smooth = layer.get("style", "blur") != "pixelate"
+    mode = Qt.TransformationMode.SmoothTransformation if smooth else Qt.TransformationMode.FastTransformation
+    cell = max(2.0, max(part.width(), part.height()) * ((0.03 + 0.25 * strength) if smooth
+                                                        else (0.015 + 0.15 * strength)))
+    small = part.scaled(max(1, round(part.width() / cell)), max(1, round(part.height() / cell)),
+                        Qt.AspectRatioMode.IgnoreAspectRatio, mode)
+    if smooth:  # a second pass softens the blocks into a blur
+        small = small.scaled(max(1, small.width() * 2), max(1, small.height() * 2),
+                             Qt.AspectRatioMode.IgnoreAspectRatio, mode)
+    p.drawImage(r, small.scaled(part.size(), Qt.AspectRatioMode.IgnoreAspectRatio, mode))
 
 
 def _text(p: QPainter, layer: dict, W, H):

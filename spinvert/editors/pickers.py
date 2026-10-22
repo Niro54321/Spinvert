@@ -101,15 +101,15 @@ class Swatches(QWidget):
             widgets.append(b)
         if self.plus:
             widgets.append(self.plus)
-        row = None
-        for i, w in enumerate(widgets):
-            if row is None or i % self.wrap == 0:
-                row = QHBoxLayout()
-                row.setSpacing(7)
-                self.grid.addLayout(row)
-            row.addWidget(w)
-        if row is not None:
-            row.addStretch()
+        # Every row gets the same gap between dots and a stretch at its end,
+        # so the dots line up in columns instead of spreading over the width.
+        for start in range(0, len(widgets), self.wrap):
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            for w in widgets[start:start + self.wrap]:
+                row.addWidget(w)
+            row.addStretch(1)
+            self.grid.addLayout(row)
 
     def _custom(self):
         if self.gradient:

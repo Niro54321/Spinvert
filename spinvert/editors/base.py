@@ -9,11 +9,11 @@ import winsound
 from pathlib import Path
 
 from PIL import Image
-from PySide6.QtCore import QObject, QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import (QColor, QCursor, QFont, QGuiApplication, QIcon, QImage, QPainter,
                            QPainterPath, QPen, QPixmap)
-from PySide6.QtWidgets import (QButtonGroup, QDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-                               QSizePolicy, QSlider, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QButtonGroup, QDialog, QHBoxLayout, QLabel, QLayout, QLineEdit, QPushButton,
+                               QScrollArea, QSizePolicy, QSlider, QVBoxLayout, QWidget)
 
 from spinvert.glassui import MARGIN, GlassFrame
 from spinvert.theme import ACCENT, app_icon
@@ -23,14 +23,22 @@ ACCENT_COLOR = ACCENT["convert"]
 
 # ------------------------------------------------------------- the dialog
 
-class GlassDialog(QDialog):
-    """A frameless liquid-glass dialog: title, body, Cancel and a primary button."""
+EDGE = 9  # px on either side of the card's border that resize the window
 
-    def __init__(self, title: str, size=(900, 660), primary: str = "Save copy"):
+
+class GlassDialog(QDialog):
+    """A frameless liquid-glass dialog: title, body, Cancel and a primary button.
+    Drag its edges or corners to resize it, the ▢ button (or a double-click on
+    the title) to fill the screen."""
+
+    def __init__(self, title: str, size=(900, 660), primary: str = "Save copy", minimum=(640, 460)):
         super().__init__(None, Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint
                          | Qt.WindowType.WindowStaysOnTopHint)
         self.setWindowTitle(f"Spinvert: {title}")
         self.setWindowIcon(app_icon())
+        self.setMouseTracking(True)
+        self.least = QSize(*minimum)
+        self.setMinimumSize(self.least)
         screen = (QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()).availableGeometry()
         self.resize(min(size[0], int(screen.width() * 0.96)), min(size[1], int(screen.height() * 0.94)))
         self.frame = GlassFrame(self, title)
@@ -39,6 +47,11 @@ class GlassDialog(QDialog):
         root.setSpacing(10)
         top = QHBoxLayout()
         top.addStretch()
+        self.max_button = self.frame.close_button(self.toggle_maximized)
+        self.max_button.setText("")  # Segoe Fluent Icons: maximize
+        self.max_button.setFont(QFont("Segoe Fluent Icons", 9))
+        self.max_button.setToolTip("Fill the screen (double-click the title)")
+        top.addWidget(self.max_button)
         top.addWidget(self.frame.close_button(self.reject))
         root.addLayout(top)
         self.body = QVBoxLayout()
@@ -79,9 +92,214 @@ class GlassDialog(QDialog):
 
     def resizeEvent(self, event):
         self.frame.resized()
+        self.frame.moved()
+        self._fit_minimum()
+
+    def _fit_minimum(self):
+        """Never smaller than the controls need, so no button or number gets cut off."""
+        lay = self.layout()
+        need = lay.totalMinimumSize()
+        if lay.hasHeightForWidth():  # rows that wrap need more height when narrow
+            need.setHeight(max(need.height(), lay.totalMinimumHeightForWidth(self.width())))
+        need = need.expandedTo(self.least)
+        if need != self.minimumSize():
+            self.setMinimumSize(need)
+
+    def showEvent(self, event):
+        self._fit_minimum()
+        super().showEvent(event)
+
+    def event(self, e):
+        handled = super().event(e)
+        if e.type() == QEvent.Type.LayoutRequest and self.layout() is not None:
+            self._fit_minimum()
+        return handled
+
+    # resizing a frameless window: Windows does the work once told which edge
+
+    def _edges(self, pos: QPointF):
+        if self.isMaximized():
+            return None
+        card = self.frame.card()
+        x, y = pos.x(), pos.y()
+        if not card.adjusted(-EDGE, -EDGE, EDGE, EDGE).contains(pos):
+            return None
+        edges = Qt.Edge(0)
+        if abs(x - card.left()) <= EDGE:
+            edges |= Qt.Edge.LeftEdge
+        elif abs(x - card.right()) <= EDGE:
+            edges |= Qt.Edge.RightEdge
+        if abs(y - card.top()) <= EDGE:
+            edges |= Qt.Edge.TopEdge
+        elif abs(y - card.bottom()) <= EDGE:
+            edges |= Qt.Edge.BottomEdge
+        return edges if edges != Qt.Edge(0) else None
+
+    def mouseMoveEvent(self, event):
+        edges = self._edges(event.position())
+        if edges is None:
+            self.unsetCursor()
+            return
+        horizontal = bool(edges & (Qt.Edge.LeftEdge | Qt.Edge.RightEdge))
+        vertical = bool(edges & (Qt.Edge.TopEdge | Qt.Edge.BottomEdge))
+        if horizontal and vertical:
+            forward = edges in (Qt.Edge.LeftEdge | Qt.Edge.TopEdge, Qt.Edge.RightEdge | Qt.Edge.BottomEdge)
+            self.setCursor(Qt.CursorShape.SizeFDiagCursor if forward else Qt.CursorShape.SizeBDiagCursor)
+        else:
+            self.setCursor(Qt.CursorShape.SizeHorCursor if horizontal else Qt.CursorShape.SizeVerCursor)
 
     def mousePressEvent(self, event):
+        edges = self._edges(event.position())
+        if edges is not None and event.button() == Qt.MouseButton.LeftButton:
+            self.windowHandle().startSystemResize(edges)
+            return
         self.frame.press(event)
+
+    def mouseDoubleClickEvent(self, event):
+        from spinvert.glassui import HEADER
+
+        if event.position().y() < MARGIN + HEADER:
+            self.toggle_maximized()
+
+    def toggle_maximized(self):
+        if self.isMaximized():
+            self.showNormal()
+            self.max_button.setText("")
+        else:
+            self.showMaximized()
+            self.max_button.setText("")  # restore
+
+
+def split(main: QWidget, side: QWidget, side_width: int = 340) -> QWidget:
+    """The editing area and its settings panel, with a handle to drag between them."""
+    from PySide6.QtWidgets import QSplitter
+
+    splitter = QSplitter(Qt.Orientation.Horizontal)
+    splitter.setChildrenCollapsible(False)
+    splitter.setHandleWidth(10)
+    # A faint glass line to grab, not a dark bar.
+    splitter.setStyleSheet("QSplitter::handle { background: rgba(255, 255, 255, 46); border-radius: 2px;"
+                           " margin: 24px 4px; }")
+    splitter.addWidget(main)
+    splitter.addWidget(side)
+    splitter.setStretchFactor(0, 1)
+    splitter.setStretchFactor(1, 0)
+    splitter.setSizes([10_000, side_width])
+    return splitter
+
+
+class SidePanel(QScrollArea):
+    """A settings column that scrolls up and down but is never cut off at the side."""
+
+    def __init__(self, inner: QWidget):
+        super().__init__()
+        self.setWidgetResizable(True)
+        self.setWidget(inner)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        inner.installEventFilter(self)
+
+    def minimumSizeHint(self) -> QSize:
+        width = self.widget().minimumSizeHint().width() + self.verticalScrollBar().sizeHint().width() + 4
+        return QSize(max(260, width), 120)
+
+    def eventFilter(self, obj, e):
+        if e.type() == QEvent.Type.LayoutRequest:
+            self.updateGeometry()  # its contents changed: the splitter may need to make room
+        return False
+
+
+class FlowLayout(QLayout):
+    """Widgets side by side, moving down to the next line when the window gets narrow."""
+
+    def __init__(self, parent=None, spacing: int = 8):
+        super().__init__(parent)
+        self.items = []
+        self.setContentsMargins(0, 0, 0, 0)
+        self.setSpacing(spacing)
+
+    def addItem(self, item):
+        self.items.append(item)
+
+    def count(self):
+        return len(self.items)
+
+    def itemAt(self, i):
+        return self.items[i] if 0 <= i < len(self.items) else None
+
+    def takeAt(self, i):
+        return self.items.pop(i) if 0 <= i < len(self.items) else None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._place(QRect(0, 0, width, 0), False)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._place(rect, True)
+
+    def sizeHint(self):
+        shown = [i.sizeHint() for i in self.items if not i.isEmpty()]
+        if not shown:
+            return QSize()
+        return QSize(sum(s.width() for s in shown) + self.spacing() * (len(shown) - 1),
+                     max(s.height() for s in shown))
+
+    def minimumSize(self):
+        size = QSize()
+        for item in self.items:
+            size = size.expandedTo(item.minimumSize())
+        return size
+
+    def _place(self, rect: QRect, apply: bool) -> int:
+        gap, lines, line, x = self.spacing(), [], [], 0
+        for item in self.items:
+            if item.isEmpty():
+                continue
+            w = item.sizeHint().width()
+            if line and x + w > rect.width():
+                lines.append(line)
+                line, x = [], 0
+            line.append(item)
+            x += w + gap
+        if line:
+            lines.append(line)
+        y = rect.y()
+        for line in lines:
+            height = max(i.sizeHint().height() for i in line)
+            x = rect.x()
+            for item in line:
+                hint = item.sizeHint()
+                if apply:
+                    item.setGeometry(QRect(QPoint(x, y + (height - hint.height()) // 2), hint))
+                x += hint.width() + gap
+            y += height + gap
+        return max(0, y - gap - rect.y())
+
+
+class Box(QWidget):
+    """A layout as a widget (for splitters). Asks for more height when rows inside
+    it wrap onto a second line, so nothing ends up drawn on top of something else."""
+
+    def resizeEvent(self, event):
+        lay = self.layout()
+        if lay is not None and lay.hasHeightForWidth():
+            need = lay.totalMinimumHeightForWidth(self.width())
+            if need != self.minimumHeight():
+                self.setMinimumHeight(need)
+        super().resizeEvent(event)
+
+
+def wrap(layout) -> QWidget:
+    """A layout as a widget."""
+    box = Box()
+    box.setLayout(layout)
+    layout.setContentsMargins(0, 0, 0, 0)
+    return box
 
 
 def busy(fn):

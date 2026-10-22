@@ -12,22 +12,25 @@ from __future__ import annotations
 import copy
 import json
 import math
+from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QKeySequence, QPainter, QPainterPath, QPen
+from PySide6.QtGui import (QColor, QFont, QFontMetricsF, QImage, QKeySequence, QPainter, QPainterPath, QPen,
+                           QShortcut)
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QFileDialog, QFontComboBox, QHBoxLayout, QListView,
                                QListWidget, QListWidgetItem, QMenu, QPlainTextEdit, QPushButton, QScrollArea,
                                QSizePolicy, QVBoxLayout, QWidget)
 
 from spinvert import layers as L
-from spinvert.editors.base import GlassDialog, Segmented, SliderRow, card, label, preview_copy, to_qimage
+from spinvert.editors.base import (GlassDialog, Segmented, SidePanel, SliderRow, card, label, preview_copy, split,
+                                   to_qimage)
 from spinvert.editors.pickers import Swatches
 
 ACCENT = QColor("#7C5CFF")
 PALETTE = ["#FF3B30", "#FF9500", "#FFCC00", "#34C759", "#0A84FF", "#7C5CFF", "#F472B6", "#FFFFFF", "#111114"]
 DRAW_TOOLS = ("arrow", "line", "rect", "ellipse", "magnify")
 TOOLS = [("select", "↖ Select"), ("arrow", "Arrow"), ("rect", "Box"), ("ellipse", "Circle"), ("line", "Line"),
-         ("pen", "Pen"), ("highlight", "Highlight"), ("text", "Text"), ("number", "Number"),
+         ("pen", "Pen"), ("highlight", "Highlight"), ("blur", "Blur"), ("text", "Text"), ("number", "Number"),
          ("magnify", "Magnifier")]
 
 
@@ -51,7 +54,7 @@ class LayerCanvas(QWidget):
         self._history, self._future = [json.dumps(self.layers)], []
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setMinimumSize(520, 360)
+        self.setMinimumSize(440, 300)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
     # geometry -----------------------------------------------------------
@@ -533,7 +536,11 @@ class Properties(QWidget):
         self.zoom_row.changed.connect(lambda v: self._set("zoom", v / 10))
         self.opacity = SliderRow("Opacity", 10, 100, 100, "%", width=86)
         self.opacity.changed.connect(lambda v: self._set("opacity", v))
-        for w in (self.width_row, self.size_row, self.zoom_row, self.opacity):
+        self.blur_style = Segmented([("blur", "Blur"), ("pixelate", "Pixelate")], "blur")
+        self.blur_style.changed.connect(lambda k: self._set("style", k))
+        self.blur_strength = SliderRow("Strength", 1, 100, 60, "%", width=86)
+        self.blur_strength.changed.connect(lambda v: self._set("strength", v))
+        for w in (self.width_row, self.size_row, self.zoom_row, self.opacity, self.blur_style, self.blur_strength):
             lay.addWidget(w)
         # text
         self.text_box = QWidget()
@@ -541,6 +548,8 @@ class Properties(QWidget):
         t.setContentsMargins(0, 4, 0, 0)
         t.setSpacing(7)
         self.font_box = QFontComboBox()
+        self.font_box.setSizeAdjustPolicy(QFontComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.font_box.setMinimumContentsLength(14)  # long font names must not widen the panel
         self.font_box.currentFontChanged.connect(lambda f: self._set("font", f.family()))
         t.addWidget(label("Font", bold=True))
         t.addWidget(self.font_box)
@@ -548,17 +557,18 @@ class Properties(QWidget):
         self.text_size.changed.connect(lambda v: self._set("size", v))
         t.addWidget(self.text_size)
         styles = QHBoxLayout()
-        self.bold = QPushButton("B")
-        self.italic = QPushButton("I")
+        self.bold = QPushButton("Bold")
+        self.italic = QPushButton("Italic")
         for b, key in ((self.bold, "bold"), (self.italic, "italic")):
             b.setCheckable(True)
             b.setProperty("segment", True)
             b.toggled.connect(lambda on, k=key: self._set(k, on))
             styles.addWidget(b)
+        styles.addStretch()
+        t.addLayout(styles)
         self.align = Segmented([("auto", "Auto"), ("left", "Left"), ("center", "Centre"), ("right", "Right")], "auto")
         self.align.changed.connect(lambda k: self._set("align", k))
-        styles.addWidget(self.align)
-        t.addLayout(styles)
+        t.addWidget(self.align)
         self.bg_on = QCheckBox("Background behind the text")
         self.bg_on.toggled.connect(lambda on: self._set_sub("bg", "on", on))
         self.bg_colors = Swatches([(c, c) for c in PALETTE], "#111114", size=24, wrap=6)
@@ -637,6 +647,13 @@ class Properties(QWidget):
         self.title.setText(("Selected: " + L.name(self.canvas.current)) if self.canvas.current
                            else f"New {L.NAMES.get(kind, kind).lower()}")
         self.colors.select(t.get("color", "#FF3B30"))
+        self.colors.setVisible(kind != "blur")
+        self.opacity.setVisible(kind != "blur")
+        self.blur_style.setVisible(kind == "blur")
+        self.blur_strength.setVisible(kind == "blur")
+        if kind == "blur":
+            self.blur_style.set(t.get("style", "blur"))
+            self.blur_strength.set(t.get("strength", 60), quiet=True)
         self.width_row.setVisible(kind in ("arrow", "line", "rect", "ellipse", "pen", "highlight"))
         self.width_row.set(t.get("width", 6), quiet=True)
         self.size_row.setVisible(kind == "number")
@@ -670,20 +687,13 @@ def side_panel(widget: QWidget, width: int = 320) -> QScrollArea:
     lay = QVBoxLayout(inner)
     lay.setContentsMargins(14, 14, 14, 14)
     lay.addWidget(widget)
-    scroll = QScrollArea()
-    scroll.setWidgetResizable(True)
-    scroll.setWidget(inner)
-    scroll.setFixedWidth(width)
-    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-    return scroll
+    return SidePanel(inner)
 
 
 class AnnotateDialog(GlassDialog):
-    def __init__(self, paths):
-        from spinvert.engines.images import _open, _upright
-
-        super().__init__("Annotate", (1320, 860))
-        self.canvas = LayerCanvas(to_qimage(preview_copy(_upright(_open(paths[0])), 1400)))
+    def __init__(self, image: QImage, title: str = "Annotate", primary: str = "Save copy"):
+        super().__init__(title, (1320, 860), primary, minimum=(820, 560))
+        self.canvas = LayerCanvas(image)
         self.tools = Segmented(TOOLS, "select")
         self.tools.changed.connect(self._tool)
         picture = QPushButton("+ Picture")
@@ -692,9 +702,7 @@ class AnnotateDialog(GlassDialog):
         top.addWidget(self.tools, 1)
         top.addWidget(picture)
         self.props = Properties(self.canvas)
-        middle = QHBoxLayout()
-        middle.addWidget(self.canvas, 1)
-        middle.addWidget(side_panel(self.props))
+        middle = split(self.canvas, side_panel(self.props))
         self.layer_list = LayerList(self.canvas)
         bottom = QHBoxLayout()
         bottom.addWidget(label("Layers  (back → front)", bold=True))
@@ -705,7 +713,7 @@ class AnnotateDialog(GlassDialog):
             b.clicked.connect(fn)
             bottom.addWidget(b)
         self.body.addLayout(top)
-        self.body.addLayout(middle, 1)
+        self.body.addWidget(middle, 1)
         self.body.addLayout(bottom)
         undo = QPushButton("Undo")
         undo.clicked.connect(self.canvas.undo)
@@ -736,7 +744,65 @@ class AnnotateDialog(GlassDialog):
 
 
 def annotate(paths, parent=None):
-    d = AnnotateDialog(paths)
+    from spinvert.engines.images import _open, _upright
+
+    d = AnnotateDialog(to_qimage(preview_copy(_upright(_open(paths[0])), 1400)))
     if not d.run():
         return None
     return {"layers": d.canvas.layers} if d.canvas.layers else None
+
+
+class ScreenshotDialog(AnnotateDialog):
+    """A fresh screenshot: mark it up (blur, text in any language and font,
+    arrows...), then copy it to the clipboard or save it."""
+
+    def __init__(self, image: QImage):
+        super().__init__(image, "Screenshot", "Copy")
+        self.image = image
+        self.action = None
+        self.ok_button.setText("Copy")
+        self.ok_button.setToolTip("Copy the picture, without saving a file (Ctrl+C)")
+        save = QPushButton("Save…")
+        save.clicked.connect(self._save)
+        self.footer.insertWidget(self.footer.count() - 1, save)
+        # A text box being typed in keeps its own Ctrl+C.
+        QShortcut(QKeySequence.StandardKey.Copy, self, self.accept)
+        QShortcut(QKeySequence.StandardKey.Save, self, self._save)
+        self.tools.set("blur")
+        self._tool("blur")
+        size = label(f"{image.width()} × {image.height()} px", muted=True)
+        self.footer_left.addWidget(size)
+
+    def final(self) -> QImage:
+        self.canvas.finish_text()
+        return L.render(self.image, self.canvas.layers)
+
+    def accept(self):  # Copy
+        from PySide6.QtGui import QGuiApplication
+
+        QGuiApplication.clipboard().setImage(self.final())
+        self.action = ("copied", None)
+        super().accept()
+
+    def _save(self):
+        import datetime as dt
+
+        folder = Path.home() / "Pictures" / "Spinvert Screenshots"
+        folder.mkdir(parents=True, exist_ok=True)
+        name = folder / f"Screenshot {dt.datetime.now():%Y-%m-%d %H-%M-%S}.png"
+        path, _ = QFileDialog.getSaveFileName(self, "Save screenshot", str(name),
+                                              "PNG picture (*.png);;JPG picture (*.jpg)")
+        if not path:
+            return
+        image = self.final()
+        if path.lower().endswith((".jpg", ".jpeg")):
+            image = image.convertToFormat(QImage.Format.Format_RGB32)
+        if image.save(path, quality=95):
+            self.action = ("saved", path)
+            GlassDialog.accept(self)
+
+
+def edit_screenshot(image: QImage):
+    """('copied', None), ('saved', path) or None when cancelled."""
+    d = ScreenshotDialog(image)
+    return d.action if d.run() else None

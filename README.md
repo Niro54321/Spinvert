@@ -78,6 +78,21 @@ settings open a glass editor with a live preview; the result is always a new cop
 | **Audio** | **Trim** (waveform, playback with sound, exact times, fade in and out, remove silence at the ends, save at another speed), **Normalize** (streaming, podcast or broadcast loudness, two-pass, shows before and after), **Visualize** (waveform or bars video in landscape, portrait or square, on a colour or your image), **Channels** (mono, stereo, left, right, swap, volume per side, listen to each), **Bleep** (mark parts on the waveform, beep or silence, compare), **Speed**, **Split**. Several files: **Join**, with a gap of silence between them if you like |
 | **PDF** | **Organize** pages (reorder, rotate, duplicate, remove), **Split** (every page, every N pages, or ranges like 1-3, 4-), **Password** (lock with AES-256 or unlock), **Text** (reads scanned pages), **Compress**. Several PDFs: **Merge** in your order |
 
+### Screenshots
+
+Press **Ctrl+Alt+S** anywhere (or *Take a screenshot* in the tray menu, or the
+**Screenshot** button). Drag to capture an area, or just click to take the whole
+screen; Esc cancels. The picture opens in the same layer editor as Annotate,
+starting on **Blur**: blur or pixelate anything private, type text in Arabic or
+English with any font installed on your PC, add arrows, boxes, numbers. Then
+**Copy** (Ctrl+C) puts it on the clipboard without saving a file, or **Save…**
+(Ctrl+S) writes a PNG or JPG to *Pictures\Spinvert Screenshots*.
+
+Every editor window can be resized from its edges, filled to the screen with the
+▢ button (or a double-click on its title), and drag the line between the picture
+and the settings to give either more room. Controls move onto a second line when
+the window is narrow, and the window never gets small enough to cut a button off.
+
 ### Beyond Tangerine
 
 Ideas added on top of the original, from what users of file converters ask for:
@@ -118,6 +133,8 @@ Word, documents still convert to PDF with Spinvert's own writer.
 - For the glass look, Spinvert keeps a snapshot of the screen behind the wheel
   (taken when you press the mouse in File Explorer) and behind its own window.
   It stays in memory, is replaced at the next press, and is never saved or sent.
+- Screenshots are taken only when you ask (Ctrl+Alt+S, the tray menu or the
+  button), and saved only when you press Save.
 
 ## Roadmap
 
