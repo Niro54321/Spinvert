@@ -14,6 +14,8 @@ AUDIO_CODEC = {
     "flac": ["-c:a", "flac"],
     "ogg": ["-c:a", "libvorbis", "-q:a", "5"],
     "opus": ["-c:a", "libopus", "-b:a", "128k"],
+    "aiff": ["-c:a", "pcm_s16be"],
+    "wma": ["-c:a", "wmav2", "-b:a", "192k"],
 }
 
 # Containers that can take these codecs as they are, without re-encoding.
@@ -102,6 +104,9 @@ def _video_args(ext: str, info: dict, settings) -> list:
     elif ext == "avi":
         args = [*maps, "-vf", EVEN, "-c:v", "libxvid", "-q:v", "4",
                 "-c:a", "libmp3lame", "-q:a", "4"]
+    elif ext == "wmv":
+        args = [*maps, "-vf", EVEN, "-c:v", "wmv2", "-q:v", "3",
+                "-c:a", "wmav2", "-b:a", "192k"]
     else:
         args = [*maps, "-vf", EVEN, "-c:v", "libx264", "-preset", "fast",
                 "-crf", str(settings.crf), "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k"]
@@ -160,7 +165,7 @@ def normalize_audio(ctx):
     info = probe(ctx, src)
     _need(info, "audio", src)
     ext = ext_of(src)
-    ext = {"aac": "m4a", "wma": "mp3", "aiff": "wav", "aif": "wav", "oga": "ogg"}.get(ext, ext)
+    ext = {"aac": "m4a", "aif": "aiff", "oga": "ogg"}.get(ext, ext)
     out = ctx.output(f"{src.stem} (normalized)", ext)
     rate = str(info["rate"] or 48000)
     ffmpeg(ctx, src, out, ["-map", "0:a:0", "-vn", "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",

@@ -3,16 +3,18 @@ and through Qt's own PDF writer when it is not."""
 
 from __future__ import annotations
 
+import plistlib
 import shutil
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 from spinvert.engines import office
 from spinvert.util import ConversionError, ext_of
 
 READERS = {"docx": "docx", "md": "markdown", "markdown": "markdown", "html": "html",
-           "htm": "html", "epub": "epub", "odt": "odt", "rtf": "rtf",
-           "txt": "markdown+hard_line_breaks"}
+           "htm": "html", "epub": "epub", "odt": "odt", "rtf": "rtf", "rtfd": "rtf",
+           "txt": "markdown+hard_line_breaks", "textclipping": "markdown+hard_line_breaks"}
 
 WRITERS = {
     "docx": ["-t", "docx"],
@@ -37,12 +39,48 @@ def pandoc_path() -> Path | None:
     return Path(found) if found else None
 
 
+def _clipping_text(src: Path) -> str:
+    """A macOS text clipping is a property list with the text under a type name."""
+    try:
+        data = plistlib.loads(src.read_bytes())
+    except Exception as e:
+        raise ConversionError(f"Can't read {src.name}: not a text clipping this Spinvert knows.") from e
+    store = data.get("UTIData", data) if isinstance(data, dict) else {}
+    for key in ("public.utf8-plain-text", "public.utf16-plain-text", "public.plain-text",
+                "NSStringPboardType"):
+        value = store.get(key)
+        if isinstance(value, bytes):
+            value = value.decode("utf-16" if "utf16" in key else "utf-8", "replace")
+        if isinstance(value, str) and value.strip():
+            return value
+    raise ConversionError(f"No text found in {src.name}.")
+
+
+@contextmanager
+def _readable(src: Path):
+    """(file Pandoc can read, folder to run in) for any document input."""
+    kind = ext_of(src)
+    if kind == "rtfd":  # a macOS bundle: a folder holding TXT.rtf and its pictures
+        rtf = next((p for p in src.glob("*.rtf")), None)
+        if rtf is None:
+            raise ConversionError(f"{src.name} has no RTF text inside.")
+        yield rtf, src
+    elif kind == "textclipping":
+        with tempfile.TemporaryDirectory(prefix="spinvert-") as tmp:
+            text = Path(tmp) / f"{src.stem}.txt"
+            text.write_text(_clipping_text(src), encoding="utf-8")
+            yield text, Path(tmp)
+    else:
+        yield src, src.parent
+
+
 def _pandoc(ctx, src: Path, out: Path, writer_args: list, extra: list = ()) -> None:
     pandoc = pandoc_path()
     if not pandoc:
         raise ConversionError("Pandoc is missing. Reinstall Spinvert's requirements.")
     reader = READERS[ext_of(src)]
-    ctx.run([pandoc, src.name, "-f", reader, *writer_args, *extra, "-o", out], cwd=src.parent)
+    with _readable(src) as (path, cwd):
+        ctx.run([pandoc, path.name, "-f", reader, *writer_args, *extra, "-o", out], cwd=cwd)
 
 
 def doc_to(ext: str):

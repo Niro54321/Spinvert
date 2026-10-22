@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import base64
+import html
 import io
+import re
+import statistics
+import tempfile
 from pathlib import Path
 
 import pypdfium2 as pdfium
@@ -75,8 +80,10 @@ def pdf_to_images(fmt: str):
     return run
 
 
-def pdf_to_text(ctx):
-    src = ctx.inputs[0]
+NO_TEXT = "No text found. This PDF is probably scanned images."
+
+
+def _page_texts(ctx, src: Path) -> list[str]:
     pdf = _open_pdfium(src)
     parts = []
     try:
@@ -84,14 +91,172 @@ def pdf_to_text(ctx):
             ctx.check()
             textpage = pdf[i].get_textpage()
             parts.append(textpage.get_text_bounded().replace("\r\n", "\n").strip())
-            ctx.progress((i + 1) / len(pdf))
+            ctx.progress(0.5 * (i + 1) / len(pdf))
     finally:
         pdf.close()
-    text = "\n\n".join(parts).strip()
+    return parts
+
+
+def pdf_to_text(ctx):
+    src = ctx.inputs[0]
+    text = "\n\n".join(_page_texts(ctx, src)).strip()
     if not text:
-        raise ConversionError("No text found. This PDF is probably scanned images.")
+        raise ConversionError(NO_TEXT)
     out = ctx.output(src.stem, "txt")
     out.write_text(text + "\n", encoding="utf-8")
+    return [out]
+
+
+# PDF to DOCX, EPUB and Markdown. A PDF stores characters at positions, not
+# paragraphs, so the document is rebuilt: lines are grouped into paragraphs by
+# their spacing, bigger text becomes headings, ruled tables become tables, and
+# pictures are cut out of the page. A page with no text at all (a scan) comes
+# through as a picture of the whole page.
+
+def _data_uri(image) -> str:
+    buf = io.BytesIO()
+    image.convert("RGB").save(buf, "JPEG", quality=85)
+    return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _inside(obj, boxes) -> bool:
+    return any(x0 - 1 <= obj["x0"] and obj["x1"] <= x1 + 1 and top - 1 <= obj["top"] and obj["bottom"] <= bottom + 1
+               for x0, top, x1, bottom in boxes)
+
+
+def _page_blocks(page, fitz_page, body_size: float) -> list[tuple[float, str]]:
+    blocks = []
+    tables = page.find_tables()
+    boxes = [t.bbox for t in tables]
+    for table in tables:
+        rows = "".join("<tr>" + "".join(f"<td>{html.escape((c or '').strip())}</td>" for c in row) + "</tr>"
+                       for row in table.extract())
+        blocks.append((table.bbox[1], f"<table>{rows}</table>"))
+
+    for img in page.images:
+        if img["x1"] - img["x0"] < 30 or img["bottom"] - img["top"] < 30:
+            continue
+        crop = (max(0, img["x0"]), max(0, page.height - img["bottom"]),
+                max(0, page.width - img["x1"]), max(0, img["top"]))
+        picture = fitz_page.render(scale=150 / 72, crop=crop).to_pil()
+        blocks.append((img["top"], f'<p><img src="{_data_uri(picture)}"/></p>'))
+
+    lines = [ln for ln in page.extract_text_lines(return_chars=True) if not _inside(ln, boxes)]
+    paragraph, last, last_size, last_tag = [], None, 0.0, "p"
+
+    def flush():
+        if paragraph:
+            text = " ".join(t for t in paragraph)
+            blocks.append((start_top, f"<{last_tag}>{html.escape(text)}</{last_tag}>"))
+            paragraph.clear()
+
+    start_top = 0.0
+    for line in lines:
+        chars = [c for c in line["chars"] if c["text"].strip()]
+        if not chars:
+            continue
+        size = sum(c["size"] for c in chars) / len(chars)
+        tag = "h1" if size >= body_size * 1.8 else "h2" if size >= body_size * 1.3 else "p"
+        gap = line["top"] - last["bottom"] if last else 0
+        if last is None or tag != last_tag or abs(size - last_size) > 1 or gap > 0.8 * size:
+            flush()
+            start_top = line["top"]
+        paragraph.append(line["text"].strip())
+        last, last_size, last_tag = line, size, tag
+    flush()
+
+    if not lines and not tables:  # a scanned page: keep it as a picture
+        blocks.append((0, f'<p><img src="{_data_uri(fitz_page.render(scale=150 / 72).to_pil())}"/></p>'))
+    return sorted(blocks, key=lambda b: b[0])
+
+
+def _reflow_html(ctx, src: Path) -> str:
+    import pdfplumber
+
+    try:
+        plumb = pdfplumber.open(str(src))
+    except Exception as e:
+        raise ConversionError(f"Can't read {src.name}. Is it password protected?") from e
+    fitz = _open_pdfium(src)
+    parts = []
+    try:
+        with plumb:
+            sample = [c["size"] for page in plumb.pages[:20] for c in page.chars if c["text"].strip()]
+            body_size = statistics.median(sample) if sample else 11.0
+            count = len(plumb.pages)
+            for i, page in enumerate(plumb.pages):
+                ctx.check()
+                parts += [block for _, block in _page_blocks(page, fitz[i], body_size)]
+                ctx.progress(0.7 * (i + 1) / count)
+    finally:
+        fitz.close()
+    title = html.escape(src.stem)
+    return f"<html><head><title>{title}</title></head><body>{''.join(parts)}</body></html>"
+
+
+def pdf_to(ext: str):
+    """PDF to DOCX, EPUB or Markdown through the rebuilt document."""
+    def run(ctx):
+        from spinvert.engines.documents import WRITERS, pandoc_path
+
+        src = ctx.inputs[0]
+        out = ctx.output(src.stem, ext)
+        extra = []
+        if ext == "md":
+            media = out.parent / f"{out.stem} files"  # the pictures, next to the Markdown file
+            ctx.created.append(media)
+            extra = ["--extract-media", media.name]
+        elif ext == "epub":
+            extra = ["--metadata", f"title={src.stem}"]
+        with tempfile.TemporaryDirectory(prefix="spinvert-") as tmp:
+            page = Path(tmp) / "document.html"
+            page.write_text(_reflow_html(ctx, src), encoding="utf-8")
+            ctx.run([pandoc_path(), page, "-f", "html", *WRITERS[ext], *extra, "-o", out.name],
+                    cwd=out.parent)
+        if ext == "md" and media.exists():
+            return [out, media]
+        return [out]
+    return run
+
+
+def pdf_to_xlsx(ctx):
+    """Tables become rows and columns, one sheet per page that has tables. A PDF
+    without ruled tables gets its text lines, split into columns at wide gaps."""
+    import pdfplumber
+    from openpyxl import Workbook
+
+    from spinvert.engines.sheets import parse_cell
+
+    src = ctx.inputs[0]
+    book = Workbook()
+    book.remove(book.active)
+    try:
+        pdf = pdfplumber.open(str(src))
+    except Exception as e:
+        raise ConversionError(f"Can't read {src.name}. Is it password protected?") from e
+    with pdf:
+        count = len(pdf.pages)
+        for i, page in enumerate(pdf.pages, 1):
+            ctx.check()
+            tables = page.extract_tables()
+            if tables:
+                ws = book.create_sheet(f"Page {i}")
+                for n, table in enumerate(tables):
+                    if n:
+                        ws.append([])
+                    for row in table:
+                        ws.append([parse_cell(c.strip()) if isinstance(c, str) else c for c in row])
+            ctx.progress(0.9 * i / count)
+        if not book.worksheets:
+            ws = book.create_sheet("Text")
+            for page in pdf.pages:
+                for line in (page.extract_text(layout=True) or "").splitlines():
+                    if line.strip():
+                        ws.append([parse_cell(c) for c in re.split(r"\s{2,}", line.strip())])
+            if ws.max_row <= 1 and ws.cell(1, 1).value is None:
+                raise ConversionError(NO_TEXT)
+    out = ctx.output(src.stem, "xlsx")
+    book.save(str(out))
     return [out]
 
 

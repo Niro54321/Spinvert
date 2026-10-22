@@ -44,18 +44,26 @@ Other ways in, for when dragging isn't handy:
 
 | Category | Convert to | Tools |
 | --- | --- | --- |
-| Images (JPG, PNG, WebP, TIFF, BMP, GIF, HEIC, AVIF) | JPG, PNG, WebP, TIFF, BMP, GIF, PDF | Compress, combine into one PDF, remove metadata |
-| Audio (MP3, M4A, WAV, FLAC, OGG, Opus, AAC, WMA, AIFF) | MP3, M4A, WAV, FLAC, OGG, Opus | Normalize volume |
-| Video (MP4, MOV, MKV, WebM, AVI, WMV and more) | MP4, MOV, MKV, WebM, AVI, GIF, MP3 | Compress, remove sound |
-| PDF | JPG, PNG (every page at 300 DPI), TXT, PPTX | Merge, split pages, reorder or remove pages, compress |
-| Documents (DOCX, Markdown, HTML, EPUB, ODT, RTF, TXT) | DOCX, PDF, Markdown, HTML, EPUB, TXT | |
+| Images (JPG, PNG, WebP, HEIC, TIFF, AVIF, BMP, GIF, SVG) | JPG, PNG, WebP, HEIC, TIFF, AVIF, BMP, GIF, PDF | Compress, combine into one PDF, remove metadata |
+| Audio (MP3, M4A, WAV, FLAC, OGG, Opus, AIFF, WMA, AAC) | MP3, M4A, WAV, FLAC, OGG, Opus, AIFF, WMA | Normalize volume |
+| Video (MP4, MOV, MKV, WebM, AVI, WMV and more) | MP4, MOV, MKV, WebM, AVI, WMV, GIF, MP3 | Compress, remove sound |
+| PDF | DOCX, PPTX, XLSX, JPG, PNG (every page at 300 DPI), EPUB, TXT, Markdown | Merge, split pages, reorder or remove pages, compress |
+| Documents (DOCX, Markdown, HTML, EPUB, ODT, RTF, TXT, and RTFD and text clippings from a Mac) | DOCX, PDF, Markdown, HTML, EPUB, TXT | |
+| Pages (read only) | PDF, DOCX, Markdown, EPUB, TXT, JPG, PNG | |
 | Slides (PPTX, PPT) | PDF, PNG, JPG (with PowerPoint), TXT, Markdown | |
-| Spreadsheets (XLSX, XLS, CSV, TSV) | XLSX, CSV, TSV, PDF (with Excel) | |
+| Spreadsheets (XLSX, XLS, ODS, CSV, TSV) | XLSX, ODS, CSV, TSV, PDF (with Excel) | |
 | Subtitles (SRT, VTT) | SRT, VTT, TXT | |
-| Archives (ZIP, TAR, TAR.GZ, GZ) and folders | Extract, ZIP, TAR, TAR.GZ | ZIP everything you dragged |
+| Archives (ZIP, TAR, GZIP, RAR) and folders | Extract, ZIP, TAR, GZIP | ZIP everything you dragged |
 
-Video to MP4, MOV, MKV or WebM is a quick re-wrap with no quality loss when
-the codecs already fit, and a re-encode only when they don't.
+- Video to MP4, MOV, MKV or WebM is a quick re-wrap with no quality loss when
+  the codecs already fit, and a re-encode only when they don't.
+- PDF to DOCX, EPUB and Markdown rebuilds the document: paragraphs, headings,
+  tables and pictures. A scanned page comes through as a picture. Layouts with
+  several columns or forms come out simpler than the original.
+- PDF to XLSX turns the PDF's tables into sheets, one per page.
+- Pages files are read through the full PDF copy that Pages keeps inside them.
+  Writing `.pages` isn't possible outside Apple's own apps.
+- RAR files open with the `tar` tool that Windows 10 and 11 include.
 
 ## Install and run
 

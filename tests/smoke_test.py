@@ -123,6 +123,24 @@ def make_samples(folder: Path, ffmpeg: Path) -> dict[str, list[Path]]:
     txt = folder / "readme.txt"
     txt.write_text("Line one\nLine two\n\nNew paragraph with ümlaut and عربي.", encoding="utf-8")
     s["document"] = [md, docx, epub, html, txt]
+    rtfd = folder / "note.rtfd"
+    rtfd.mkdir()
+    subprocess.run([str(pandoc), md.name, "-s", "-t", "rtf", "-o", str(rtfd / "TXT.rtf")], cwd=folder, check=True)
+    clip = folder / "snippet.textClipping"
+    import plistlib
+    clip.write_bytes(plistlib.dumps({"UTIData": {"public.utf8-plain-text": "Clipped text\nsecond line".encode()}},
+                                    fmt=plistlib.FMT_BINARY))
+    s["document"] += [rtfd, clip]
+    svg = folder / "logo.svg"
+    svg.write_text('<svg xmlns="http://www.w3.org/2000/svg" width="120" height="80" viewBox="0 0 120 80">'
+                   '<rect x="5" y="5" width="110" height="70" rx="14" fill="#7C5CFF"/>'
+                   '<circle cx="60" cy="40" r="22" fill="#fff" opacity=".8"/></svg>', encoding="utf-8")
+    s["image"].append(svg)
+    pages_file = folder / "essay.pages"
+    with zipfile.ZipFile(pages_file, "w") as zf:
+        zf.writestr("Index/Document.iwa", b"\x00private")
+        zf.write(text_pdf, "QuickLook/Preview.pdf")
+    s["pages"] = [pages_file]
 
     from pptx import Presentation
     prs = Presentation()
@@ -152,7 +170,10 @@ def make_samples(folder: Path, ffmpeg: Path) -> dict[str, list[Path]]:
     csv_.write_text("name;age;zip\nAna;31;01234\nOmar;45;90210\n", encoding="utf-8")
     tsv = folder / "table.tsv"
     tsv.write_text("a\tb\n1\t2\n", encoding="utf-8")
-    s["sheet"] = [xlsx, csv_, tsv]
+    from spinvert.engines.sheets import write_ods
+    ods = folder / "open.ods"
+    write_ods([("Data", [["item", "qty"], ["pen", 3], ["ink", 2.5]])], ods)
+    s["sheet"] = [xlsx, csv_, tsv, ods]
 
     srt = folder / "movie.srt"
     srt.write_text("1\n00:00:01,000 --> 00:00:02,500\n<i>Hello</i>\n\n2\n00:00:03,000 --> 00:00:04,000\nWorld\n",
@@ -179,6 +200,13 @@ def make_samples(folder: Path, ffmpeg: Path) -> dict[str, list[Path]]:
     with open(txt, "rb") as fin, gzip.open(gz, "wb") as fout:
         shutil.copyfileobj(fin, fout)
     s["archive"] = [zip_, tgz, gz]
+    rar_tool = Path(r"C:\Program Files\WinRAR\Rar.exe")
+    if rar_tool.is_file():  # only to make a sample; Spinvert itself opens RAR with Windows' tar
+        rar = folder / "photos.rar"
+        subprocess.run([str(rar_tool), "a", "-ep1", "-idq", str(rar), str(pack)], check=True)
+        s["archive"].append(rar)
+    else:
+        print("  (no RAR sample: WinRAR not installed)")
     s["folder"] = [pack]
     return s
 
@@ -197,14 +225,24 @@ def check_output(path: Path, ffprobe: Path | None) -> str:
     if ext == ".pdf":
         from pypdf import PdfReader
         return f"PDF {len(PdfReader(str(path)).pages)} pages"
-    if ext in (".mp3", ".m4a", ".wav", ".flac", ".ogg", ".opus", ".mp4", ".mov", ".mkv", ".webm", ".avi"):
+    if ext in (".mp3", ".m4a", ".wav", ".flac", ".ogg", ".opus", ".aiff", ".wma",
+               ".mp4", ".mov", ".mkv", ".webm", ".avi", ".wmv"):
         out = subprocess.run([str(ffprobe), "-v", "error", "-show_entries",
                               "format=duration:stream=codec_name", "-of", "json", str(path)],
                              capture_output=True, text=True, check=True).stdout
         data = json.loads(out)
         codecs = ",".join(st["codec_name"] for st in data.get("streams", []))
         return f"{float(data['format']['duration']):.1f}s {codecs}"
-    if ext in (".docx", ".pptx", ".xlsx", ".epub", ".zip"):
+    if ext == ".ods":
+        from spinvert.engines.sheets import read_sheets
+        sheets = read_sheets(None, path)
+        return f"ODS {len(sheets)} sheets, {sum(len(r) for _, r in sheets)} rows"
+    if ext == ".xlsx":
+        from openpyxl import load_workbook
+        book = load_workbook(str(path), read_only=True)
+        rows = sum(ws.max_row or 0 for ws in book.worksheets)
+        return f"XLSX {len(book.worksheets)} sheets, {rows} rows"
+    if ext in (".docx", ".pptx", ".epub", ".zip"):
         assert zipfile.is_zipfile(path), "not a valid zip container"
         return f"{ext[1:].upper()} {path.stat().st_size // 1024 + 1} KB"
     if ext in (".tar", ".gz"):

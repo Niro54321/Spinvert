@@ -18,7 +18,39 @@ except Exception:  # HEIC input is optional
 Image.MAX_IMAGE_PIXELS = 400_000_000
 
 
+def _open_svg(path: Path) -> Image.Image:
+    """Draw an SVG with Qt, at least 2048 px on its long side."""
+    from spinvert.mainthread import run_in_main
+
+    def render():
+        from PySide6.QtGui import QImage, QPainter
+        from PySide6.QtSvg import QSvgRenderer
+
+        renderer = QSvgRenderer(str(path))
+        if not renderer.isValid():
+            return None
+        size = renderer.defaultSize()
+        w, h = max(1, size.width()), max(1, size.height())
+        scale = min(max(1.0, 2048 / max(w, h)), 8192 / max(w, h))
+        img = QImage(round(w * scale), round(h * scale), QImage.Format.Format_ARGB32_Premultiplied)
+        img.fill(0)
+        painter = QPainter(img)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        renderer.render(painter)
+        painter.end()
+        img = img.convertToFormat(QImage.Format.Format_RGBA8888)
+        return Image.frombuffer("RGBA", (img.width(), img.height()), bytes(img.constBits()),
+                                "raw", "RGBA", img.bytesPerLine(), 1).copy()
+
+    im = run_in_main(render)
+    if im is None:
+        raise ConversionError("Can't read this SVG.")
+    return im
+
+
 def _open(path: Path) -> Image.Image:
+    if ext_of(path) == "svg":
+        return _open_svg(path)
     try:
         im = Image.open(path)
         im.load()

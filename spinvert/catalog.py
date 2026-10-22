@@ -6,26 +6,29 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from spinvert.engines import archives, documents, images, media, pdfs, sheets, slides, subtitles
+from spinvert.engines import (archives, documents, images, media, pages, pdfs, sheets, slides,
+                              subtitles)
 from spinvert.util import ext_of, normal_ext
 
 EXTENSIONS = {
-    "image": "jpg jpeg png webp tif tiff bmp gif heic heif avif",
+    "image": "jpg jpeg png webp tif tiff bmp gif heic heif avif svg",
     "audio": "mp3 m4a wav flac ogg oga opus aac wma aiff aif",
     "video": "mp4 mov mkv webm avi wmv m4v flv mpg mpeg 3gp ts",
     "pdf": "pdf",
-    "document": "docx md markdown html htm epub odt rtf txt",
+    "document": "docx md markdown html htm epub odt rtf rtfd txt textclipping",
+    "pages": "pages",
     "slides": "pptx ppt",
-    "sheet": "xlsx xls csv tsv",
+    "sheet": "xlsx xls ods csv tsv",
     "subtitle": "srt vtt",
-    "archive": "zip tar tar.gz tgz gz",
+    "archive": "zip tar tar.gz tgz gz rar",
 }
 CATEGORY_OF = {ext: cat for cat, exts in EXTENSIONS.items() for ext in exts.split()}
 ANY = "*"
+BUNDLES = {"rtfd", "pages"}  # macOS documents that can arrive as folders
 
 
 def category(path: Path) -> str | None:
-    if path.is_dir():
+    if path.is_dir() and ext_of(path) not in BUNDLES:
         return "folder"
     return CATEGORY_OF.get(ext_of(path))
 
@@ -64,27 +67,40 @@ def _add(key, label, wheel, cats, func, **kw):
 
 # Convert wheel. The order here is the order around the wheel.
 
-for ext, label in [("jpg", "JPG"), ("png", "PNG"), ("webp", "WebP"), ("tiff", "TIFF"),
-                   ("bmp", "BMP"), ("gif", "GIF"), ("pdf", "PDF")]:
+for ext, label in [("jpg", "JPG"), ("png", "PNG"), ("webp", "WebP"), ("heic", "HEIC"),
+                   ("tiff", "TIFF"), ("avif", "AVIF"), ("bmp", "BMP"), ("gif", "GIF"), ("pdf", "PDF")]:
     _add(ext, label, "convert", "image", images.image_to(ext), target=ext)
 
 for ext, label in [("mp3", "MP3"), ("m4a", "M4A"), ("wav", "WAV"), ("flac", "FLAC"),
-                   ("ogg", "OGG"), ("opus", "Opus")]:
+                   ("ogg", "OGG"), ("opus", "Opus"), ("aiff", "AIFF"), ("wma", "WMA")]:
     _add(ext, label, "convert", "audio", media.audio_to(ext), target=ext, needs=("ffmpeg",))
 
-for ext, label in [("mp4", "MP4"), ("mov", "MOV"), ("mkv", "MKV"), ("webm", "WebM"), ("avi", "AVI")]:
+for ext, label in [("mp4", "MP4"), ("mov", "MOV"), ("mkv", "MKV"), ("webm", "WebM"),
+                   ("avi", "AVI"), ("wmv", "WMV")]:
     _add(ext, label, "convert", "video", media.video_to(ext), target=ext, needs=("ffmpeg",))
 _add("gif", "GIF", "convert", "video", media.video_to_gif, needs=("ffmpeg",))
 _add("mp3", "MP3", "convert", "video", media.audio_to("mp3"), needs=("ffmpeg",))
 
+_add("docx", "DOCX", "convert", "pdf", pdfs.pdf_to("docx"), needs=("pandoc",))
+_add("pptx", "PPTX", "convert", "pdf", pdfs.pdf_to_pptx)
+_add("xlsx", "XLSX", "convert", "pdf", pdfs.pdf_to_xlsx)
 _add("jpg", "JPG", "convert", "pdf", pdfs.pdf_to_images("jpg"))
 _add("png", "PNG", "convert", "pdf", pdfs.pdf_to_images("png"))
+_add("epub", "EPUB", "convert", "pdf", pdfs.pdf_to("epub"), needs=("pandoc",))
 _add("txt", "TXT", "convert", "pdf", pdfs.pdf_to_text)
-_add("pptx", "PPTX", "convert", "pdf", pdfs.pdf_to_pptx)
+_add("md", "Markdown", "convert", "pdf", pdfs.pdf_to("md"), needs=("pandoc",))
 
 for ext, label in [("docx", "DOCX"), ("pdf", "PDF"), ("md", "Markdown"), ("html", "HTML"),
                    ("epub", "EPUB"), ("txt", "TXT")]:
     _add(ext, label, "convert", "document", documents.doc_to(ext), target=ext, needs=("pandoc",))
+
+_add("pdf", "PDF", "convert", "pages", pages.via_pdf(None))
+_add("docx", "DOCX", "convert", "pages", pages.via_pdf(pdfs.pdf_to("docx")), needs=("pandoc",))
+_add("md", "Markdown", "convert", "pages", pages.via_pdf(pdfs.pdf_to("md")), needs=("pandoc",))
+_add("epub", "EPUB", "convert", "pages", pages.via_pdf(pdfs.pdf_to("epub")), needs=("pandoc",))
+_add("txt", "TXT", "convert", "pages", pages.via_pdf(pdfs.pdf_to_text))
+_add("jpg", "JPG", "convert", "pages", pages.via_pdf(pdfs.pdf_to_images("jpg")))
+_add("png", "PNG", "convert", "pages", pages.via_pdf(pdfs.pdf_to_images("png")))
 
 _add("pdf", "PDF", "convert", "slides", slides.slides_to_pdf, needs=("powerpoint",))
 _add("png", "PNG", "convert", "slides", slides.slides_to_images("png"), needs=("powerpoint",))
@@ -93,6 +109,7 @@ _add("txt", "TXT", "convert", "slides", slides.slides_to_text("txt"), in_exts=fr
 _add("md", "Markdown", "convert", "slides", slides.slides_to_text("md"), in_exts=frozenset({"pptx"}))
 
 _add("xlsx", "XLSX", "convert", "sheet", sheets.to_xlsx, target="xlsx")
+_add("ods", "ODS", "convert", "sheet", sheets.to_ods, target="ods")
 _add("csv", "CSV", "convert", "sheet", sheets.to_delimited("csv"), target="csv")
 _add("tsv", "TSV", "convert", "sheet", sheets.to_delimited("tsv"), target="tsv")
 _add("pdf", "PDF", "convert", "sheet", sheets.to_pdf, needs=("excel",))
@@ -101,7 +118,7 @@ for ext, label in [("srt", "SRT"), ("vtt", "VTT"), ("txt", "TXT")]:
     _add(ext, label, "convert", "subtitle", subtitles.subs_to(ext), target=ext)
 
 _add("extract", "Extract", "convert", "archive", archives.extract)
-for kind, label in [("zip", "ZIP"), ("tar", "TAR"), ("tar.gz", "TAR.GZ")]:
+for kind, label in [("zip", "ZIP"), ("tar", "TAR"), ("tar.gz", "GZIP")]:
     _add(kind, label, "convert", "archive", archives.repack(kind), target=kind)
     _add(kind, label, "convert", "folder", archives.folder_to(kind))
 
@@ -115,7 +132,8 @@ _add("merge", "Merge", "tools", "pdf", pdfs.merge, combine=True, min_items=2)
 _add("split", "Split pages", "tools", "pdf", pdfs.split)
 _add("reorder", "Reorder", "tools", "pdf", pdfs.reorder, max_items=1,
      prepare="spinvert.dialogs:ask_page_order")
-_add("clean", "Remove metadata", "tools", "image", images.strip_metadata)
+_add("clean", "Remove metadata", "tools", "image", images.strip_metadata,
+     in_exts=frozenset(EXTENSIONS["image"].split()) - {"svg"})
 _add("normalize", "Normalize volume", "tools", "audio", media.normalize_audio, needs=("ffmpeg",))
 _add("mute", "Remove sound", "tools", "video", media.remove_audio, needs=("ffmpeg",))
 _add("zip", "ZIP all", "tools", ANY, archives.zip_all, combine=True)

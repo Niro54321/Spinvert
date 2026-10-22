@@ -6,14 +6,17 @@ from __future__ import annotations
 
 import functools
 import gc
+import subprocess
 import threading
 from pathlib import Path
 
-from spinvert.util import ConversionError
+from spinvert.util import CREATE_NO_WINDOW, ConversionError
 
 PROGIDS = {"word": "Word.Application", "powerpoint": "PowerPoint.Application",
            "excel": "Excel.Application"}
+EXES = {"word": "WINWORD.EXE", "powerpoint": "POWERPNT.EXE", "excel": "EXCEL.EXE"}
 NO_PASSWORD = "spinvert-no-password"  # makes locked files fail instead of prompting
+TIMEOUT = 180  # seconds before a frozen Office copy is closed
 
 _lock = threading.Lock()
 
@@ -30,16 +33,41 @@ def available(name: str) -> bool:
         return False
 
 
+def _pids(exe: str) -> set[int]:
+    out = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {exe}", "/FO", "CSV", "/NH"],
+                         capture_output=True, text=True, creationflags=CREATE_NO_WINDOW).stdout
+    return {int(row.split('","')[1]) for row in out.splitlines() if row.startswith('"')}
+
+
 def _with_office(name: str, work):
+    """Run work(app) in a hidden copy of an Office app. If that copy stops
+    responding (an unexpected dialog can freeze it), close it after TIMEOUT
+    seconds instead of waiting forever. Never touches a copy the user opened."""
     if not available(name):
         raise ConversionError(f"Microsoft {name.capitalize()} is needed for this conversion.")
     import comtypes
     import comtypes.client
 
+    exe = EXES[name]
     with _lock:
         comtypes.CoInitialize()
+        timed_out = threading.Event()
+        watchdog = None
         try:
+            before = _pids(exe)
             app = comtypes.client.CreateObject(PROGIDS[name])
+            ours = _pids(exe) - before
+            if len(ours) == 1:
+                pid = ours.pop()
+
+                def kill():
+                    timed_out.set()
+                    subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True,
+                                   creationflags=CREATE_NO_WINDOW)
+
+                watchdog = threading.Timer(TIMEOUT, kill)
+                watchdog.daemon = True
+                watchdog.start()
             try:
                 return work(app)
             finally:
@@ -48,9 +76,13 @@ def _with_office(name: str, work):
         except ConversionError:
             raise
         except Exception as e:
+            if timed_out.is_set():
+                raise ConversionError(f"{name.capitalize()} stopped responding, so Spinvert closed it.") from e
             message = getattr(e, "text", None) or str(e)
             raise ConversionError(f"{name.capitalize()} couldn't convert it: {message}"[:300]) from e
         finally:
+            if watchdog:
+                watchdog.cancel()
             gc.collect()
             comtypes.CoUninitialize()
 

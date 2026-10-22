@@ -70,6 +70,15 @@ def extract_to(ctx, src: Path, folder: Path) -> None:
         elif kind == "gz":
             with gzip.open(src) as fin, open(folder / stem_of(src), "wb") as fout:
                 shutil.copyfileobj(fin, fout)
+        elif kind == "rar":
+            # Windows 10 and 11 ship bsdtar (libarchive), which reads RAR and RAR5.
+            tar = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "tar.exe"
+            if not tar.is_file():
+                raise ConversionError("Opening RAR needs Windows 10 (1803) or newer.")
+            try:
+                ctx.run([tar, "-xf", src, "-C", folder])
+            except ConversionError as e:
+                raise ConversionError(f"Can't open {src.name}. Is it password protected? ({e})") from e
         else:
             raise ConversionError(f"Can't open .{kind} archives.")
     except (zipfile.BadZipFile, tarfile.TarError, gzip.BadGzipFile, EOFError) as e:
