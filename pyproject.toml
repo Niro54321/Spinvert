@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spinvert"
+version = "0.1.0"
+description = "Drag a file, hold a key, drop it on a format. Offline file converter for Windows."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = [
+    "PySide6-Essentials>=6.7",
+    "Pillow>=11.2",
+    "pillow-heif>=0.18",
+    "pypdf>=5.0",
+    "pypdfium2>=4.30",
+    "openpyxl>=3.1",
+    "python-pptx>=1.0",
+    "pypandoc-binary>=1.13",
+    "comtypes>=1.4",
+]
+
+[project.gui-scripts]
+spinvert = "spinvert.app:main"
+
+[tool.setuptools.packages.find]
+include = ["spinvert*"]
