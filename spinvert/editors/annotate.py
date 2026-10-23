@@ -68,13 +68,15 @@ class LayerCanvas(QWidget):
         return self.image.height() or 1
 
     def target(self) -> QRectF:
+        """Where the picture shows: as big as fits, but never stretched past its own
+        pixels (that blurs it), and on whole screen pixels so 100% stays sharp."""
         area = QRectF(self.rect()).adjusted(8, 8, -8, -8)
-        ratio = self.W / self.H
-        if area.width() / area.height() > ratio:
-            w = area.height() * ratio
-            return QRectF(area.center().x() - w / 2, area.top(), w, area.height())
-        h = area.width() / ratio
-        return QRectF(area.left(), area.center().y() - h / 2, area.width(), h)
+        dpr = self.devicePixelRatioF()
+        s = min(area.width() / self.W, area.height() / self.H, 1 / dpr)
+        w, h = self.W * s, self.H * s
+        x = round((area.center().x() - w / 2) * dpr) / dpr
+        y = round((area.center().y() - h / 2) * dpr) / dpr
+        return QRectF(x, y, w, h)
 
     def _scale(self) -> float:
         return self.target().width() / self.W
@@ -267,7 +269,10 @@ class LayerCanvas(QWidget):
         p.setClipPath(clip)
         p.fillRect(t, QColor(255, 255, 255, 20))
         if not self.image.isNull():
+            exact = abs(self._scale() * self.devicePixelRatioF() - 1) < 1e-6
+            p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, not exact)  # 100%: pixel for pixel
             p.drawImage(t, self.image)
+            p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         p.translate(t.topLeft())
         s = self._scale()
         p.scale(s, s)
@@ -772,6 +777,8 @@ class ScreenshotDialog(AnnotateDialog):
         self._tool("blur")
         size = label(f"{image.width()} × {image.height()} px", muted=True)
         self.footer_left.addWidget(size)
+        # A big capture opens on the whole screen, so it is shrunk as little as possible.
+        self.start_maximized = image.width() > 1000 or image.height() > 640
 
     def final(self) -> QImage:
         self.canvas.finish_text()

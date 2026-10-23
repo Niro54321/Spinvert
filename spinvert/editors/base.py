@@ -38,6 +38,7 @@ class GlassDialog(QDialog):
         self.setWindowIcon(app_icon())
         self.setMouseTracking(True)
         self.least = QSize(*minimum)
+        self.start_maximized = False
         self.setMinimumSize(self.least)
         screen = (QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()).availableGeometry()
         self.resize(min(size[0], int(screen.width() * 0.96)), min(size[1], int(screen.height() * 0.94)))
@@ -78,6 +79,9 @@ class GlassDialog(QDialog):
         screen = (QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()).availableGeometry()
         self.move(screen.center().x() - self.width() // 2, screen.center().y() - self.height() // 2)
         self.frame.refresh_backdrop()
+        if self.start_maximized:
+            self.setWindowState(Qt.WindowState.WindowMaximized)
+            self.max_button.setText("\uE923")  # restore
         accepted = self.exec() == QDialog.DialogCode.Accepted
         stop_sound()
         return accepted
