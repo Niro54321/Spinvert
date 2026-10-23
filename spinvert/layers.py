@@ -338,6 +338,9 @@ def paint(p: QPainter, layer: dict, W: float, H: float, source: QImage | None = 
 def _blur(p: QPainter, layer: dict, r: QRectF, source: QImage, W, H):
     """Blur or pixelate the picture under a box: shrink that part, then stretch
     it back (smoothly for blur, in blocks for pixelate)."""
+    # Only the part over the picture: empty pixels from outside it would thin the
+    # blur out and let what is under it show through.
+    r = r.intersected(QRectF(0, 0, W, H))
     if r.width() < 2 or r.height() < 2:
         return
     sx, sy = source.width() / W, source.height() / H
