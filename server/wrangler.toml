@@ -1,0 +1,20 @@
+# Spinvert share server. See server/README.md to run your own.
+name = "spinvert-share"
+main = "src/worker.js"
+compatibility_date = "2026-10-01"
+
+[[r2_buckets]]
+binding = "SHOTS"
+bucket_name = "spinvert-shots"
+
+# Uploads per visitor (by IP) per minute.
+[[ratelimits]]
+name = "UPLOADS"
+namespace_id = "5350"
+simple = { limit = 10, period = 60 }
+
+[vars]
+MAX_BYTES = "10485760"   # 10 MB per picture
+EXPIRE_DAYS = "365"      # keep in step with the bucket's lifecycle rule
+ABUSE_CONTACT = ""       # an email address for abuse reports; set before going public
+PROJECT_URL = "https://github.com/Niro54321/Spinvert"

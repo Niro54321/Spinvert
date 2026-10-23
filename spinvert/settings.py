@@ -22,6 +22,8 @@ class Settings:
     ffmpeg_path: str = ""
     screenshot_modifiers: int = 0x3  # Ctrl+Alt
     screenshot_key: int = 0x53  # S
+    share_server: str = ""  # empty: Spinvert's own share server
+    share_agreed: bool = False  # said yes to "anyone with the link can see it"
     welcomed: bool = False
 
     @property

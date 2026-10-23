@@ -22,8 +22,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QFileDialog, QFontC
                                QSizePolicy, QVBoxLayout, QWidget)
 
 from spinvert import layers as L
-from spinvert.editors.base import (GlassDialog, Segmented, SidePanel, SliderRow, card, label, preview_copy, split,
-                                   to_qimage)
+from spinvert.editors.base import (Background, GlassDialog, Segmented, SidePanel, SliderRow, card, label, preview_copy,
+                                   split, to_qimage)
 from spinvert.editors.pickers import Swatches
 
 ACCENT = QColor("#7C5CFF")
@@ -761,15 +761,29 @@ class ScreenshotDialog(AnnotateDialog):
     """A fresh screenshot: mark it up (blur, text in any language and font,
     arrows...), then copy it to the clipboard or save it."""
 
-    def __init__(self, image: QImage):
+    def __init__(self, image: QImage, settings=None):
         super().__init__(image, "Screenshot", "Copy")
+        from spinvert import share
+        from spinvert.settings import Settings
+
         self.image = image
+        self.settings = settings or Settings.load()
         self.action = None
         self.ok_button.setText("Copy")
         self.ok_button.setToolTip("Copy the picture, without saving a file (Ctrl+C)")
         save = QPushButton("Save…")
         save.clicked.connect(self._save)
         self.footer.insertWidget(self.footer.count() - 1, save)
+        self.share_button = QPushButton("Share link")
+        self.share_button.clicked.connect(self._share)
+        if share.server_for(self.settings):
+            self.share_button.setToolTip("Upload the picture and copy a link to it (Ctrl+D)")
+            QShortcut(QKeySequence("Ctrl+D"), self, self._share)
+        else:
+            self.share_button.setEnabled(False)
+            self.share_button.setToolTip("No share server is set up yet (Settings)")
+        self.footer.insertWidget(self.footer.count() - 1, self.share_button)
+        self._uploader = None
         # A text box being typed in keeps its own Ctrl+C.
         QShortcut(QKeySequence.StandardKey.Copy, self, self.accept)
         QShortcut(QKeySequence.StandardKey.Save, self, self._save)
@@ -809,7 +823,57 @@ class ScreenshotDialog(AnnotateDialog):
             GlassDialog.accept(self)
 
 
-def edit_screenshot(image: QImage):
-    """('copied', None), ('saved', path) or None when cancelled."""
-    d = ScreenshotDialog(image)
+    def _share(self):
+        from PySide6.QtCore import QBuffer, QIODevice
+        from PySide6.QtWidgets import QMessageBox
+
+        from spinvert import share
+
+        if self._uploader is not None or not self.share_button.isEnabled():
+            return
+        if not self.settings.share_agreed:
+            box = QMessageBox(QMessageBox.Icon.Information, "Share as a link",
+                              "The picture is uploaded to Spinvert's share server, and anyone who has the link "
+                              "can see it. It is deleted after a year, or sooner if you open its delete link "
+                              "(Settings → Shared links).\n\nBlur anything private before you share.",
+                              QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel, self)
+            box.button(QMessageBox.StandardButton.Ok).setText("Share")
+            again = QCheckBox("Don't ask again")
+            box.setCheckBox(again)
+            if box.exec() != QMessageBox.StandardButton.Ok:
+                return
+            if again.isChecked():
+                self.settings.share_agreed = True
+                self.settings.save()
+        buf = QBuffer()
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        self.final().save(buf, "PNG")
+        png = bytes(buf.data())
+        server = share.server_for(self.settings)
+        self.share_button.setText("Uploading…")
+        for b in (self.share_button, self.ok_button):
+            b.setEnabled(False)
+        self._uploader = Background()
+        self._uploader.done.connect(self._shared)
+        self._uploader.start(lambda: share.upload(png, server))
+
+    def _shared(self, result, error):
+        from PySide6.QtGui import QGuiApplication
+        from PySide6.QtWidgets import QMessageBox
+
+        self._uploader = None
+        self.share_button.setText("Share link")
+        for b in (self.share_button, self.ok_button):
+            b.setEnabled(True)
+        if error is not None:
+            QMessageBox.warning(self, "Spinvert", str(error))
+            return
+        QGuiApplication.clipboard().setText(result["url"])
+        self.action = ("shared", result["url"])
+        GlassDialog.accept(self)
+
+
+def edit_screenshot(image: QImage, settings=None):
+    """('copied', None), ('saved', path), ('shared', url) or None when cancelled."""
+    d = ScreenshotDialog(image, settings)
     return d.action if d.run() else None

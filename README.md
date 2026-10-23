@@ -90,6 +90,12 @@ English with any font installed on your PC, add arrows, boxes, numbers. Then
 **Copy** (Ctrl+C) puts it on the clipboard without saving a file, or **Save…**
 (Ctrl+S) writes a PNG or JPG to *Pictures\Spinvert Screenshots*.
 
+**Share link** (Ctrl+D) uploads the picture and copies a link to it, ready to
+paste in a chat. Links are random and can't be guessed, pages are hidden from
+search engines, and a picture is deleted after a year. Every picture you share
+gets its own delete link, listed in *Settings → Shared links*. Please share only
+what you have the right to share; illegal content is removed and reported.
+
 Every editor window can be resized from its edges, filled to the screen with the
 ▢ button (or a double-click on its title), and drag the line between the picture
 and the settings to give either more room. Controls move onto a second line when
@@ -138,8 +144,12 @@ Word, documents still convert to PDF with Spinvert's own writer.
 
 ## Privacy
 
-- No uploads. Every conversion runs on your own PC.
-- No account, no sign-in, no telemetry, no network calls.
+- No uploads. Every conversion runs on your own PC. The one exception is a
+  screenshot you choose to share with **Share link**: that picture, and only
+  that picture, goes to Spinvert's share server (a Cloudflare Worker, code in
+  [`server/`](server/)), which keeps no account, name or log of who uploaded it.
+- No account, no sign-in, no telemetry. Spinvert connects to the internet only
+  when you press Share link.
 - To spot the drag, Spinvert checks the state of the mouse button and of
   Shift, Ctrl, Alt and Esc a few dozen times a second. It does not record
   keystrokes and installs no keyboard hooks.
@@ -183,6 +193,7 @@ check inside the packaged app, then writes `dist\Spinvert-Setup-<version>.exe`.
 | `spinvert/watcher.py` | Spots a file drag plus a key press |
 | `spinvert/wheel.py` | The radial wheel and its drop handling |
 | `packaging/` | The installer: PyInstaller recipe, Inno Setup script, build and self-test |
+| `server/` | The share server for screenshot links: a Cloudflare Worker with R2 storage |
 
 Built on [FFmpeg](https://ffmpeg.org/), [Pillow](https://python-pillow.org/),
 [pillow-heif](https://github.com/bigcat88/pillow_heif), [pypdf](https://github.com/py-pdf/pypdf),

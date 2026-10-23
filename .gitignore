@@ -21,6 +21,7 @@ publish/
 
 # Dependencies
 node_modules/
+.wrangler/
 packages/
 .venv/
 __pycache__/

@@ -132,12 +132,13 @@ class Controller(QObject):
     def _edit_screenshot(self, image):
         from spinvert.editors.annotate import edit_screenshot
 
-        result = edit_screenshot(image)
+        result = edit_screenshot(image, self.settings)
         if not result:
             return
         kind, path = result
-        text = ("Screenshot copied. Paste it anywhere with Ctrl+V." if kind == "copied"
-                else f"Screenshot saved: {Path(path).name}")
+        text = {"copied": "Screenshot copied. Paste it anywhere with Ctrl+V.",
+                "shared": f"Link copied: {path}\nPaste it anywhere with Ctrl+V.",
+                }.get(kind) or f"Screenshot saved: {Path(path).name}"
         self.tray.showMessage(APP_NAME, text, app_icon(), 3500)
 
     def show_settings(self):

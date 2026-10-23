@@ -148,6 +148,16 @@ class SettingsDialog(QDialog):
         shortcut_row = QHBoxLayout()
         shortcut_row.addWidget(self.shortcut)
         shortcut_row.addStretch()
+        from spinvert import share
+
+        self.share_server = QLineEdit(s.share_server)
+        self.share_server.setPlaceholderText(share.DEFAULT_SERVER or "https://… (your own share server)")
+        links = QPushButton("Shared links…")
+        links.setToolTip("Every screenshot you shared, with its delete link")
+        links.clicked.connect(self._links)
+        share_row = QHBoxLayout()
+        share_row.addWidget(self.share_server, 1)
+        share_row.addWidget(links)
         self.startup = QCheckBox("Start Spinvert when Windows starts")
         self.startup.setChecked(system.startup_enabled())
         self.sendto = QCheckBox("Add Spinvert to the right-click \"Send to\" menu")
@@ -167,6 +177,7 @@ class SettingsDialog(QDialog):
         form.addRow("", self.explorer_only)
         form.addRow("Screenshot shortcut", shortcut_row)
         form.addRow("", self.shortcut.note)
+        form.addRow("Share server", share_row)
         form.addRow("JPG / WebP quality", quality_row)
         form.addRow("Video quality", self.video_quality)
         form.addRow("FFmpeg", ffmpeg_row)
@@ -234,7 +245,24 @@ class SettingsDialog(QDialog):
         if path:
             self.ffmpeg.setText(path)
 
+    def _links(self):
+        import os
+
+        from spinvert import share
+
+        if not share.history():
+            QMessageBox.information(self, "Spinvert", "You haven't shared any screenshots yet.")
+            return
+        share.write_page(share.history())
+        os.startfile(share.history_page())
+
     def _save(self):
+        from spinvert import share
+
+        server = self.share_server.text().strip().rstrip("/")
+        if server and not share.valid_server(server):
+            QMessageBox.warning(self, "Spinvert", "The share server address must start with https://.")
+            return
         convert_key = self.convert_key.currentData()
         tools_key = self.tools_key.currentData()
         if convert_key == tools_key:
@@ -248,6 +276,7 @@ class SettingsDialog(QDialog):
             return
         s = self.controller.settings
         s.screenshot_modifiers, s.screenshot_key = hotkey.modifiers, hotkey.vk
+        s.share_server = server
         s.convert_key, s.tools_key = convert_key, tools_key
         s.explorer_only = self.explorer_only.isChecked()
         s.image_quality = self.image_quality.value()

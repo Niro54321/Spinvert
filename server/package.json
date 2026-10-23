@@ -1,0 +1,13 @@
+{
+  "name": "spinvert-share",
+  "private": true,
+  "description": "Turns a Spinvert screenshot into a link: a Cloudflare Worker with R2 storage.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node --test test/"
+  },
+  "devDependencies": {
+    "wrangler": "4.152.0"
+  }
+}
