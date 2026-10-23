@@ -2,6 +2,7 @@
 
     spinvert-selftest.exe [work folder]      every conversion and tool (the smoke test)
     spinvert-selftest.exe --player <video>   Qt Multimedia decodes frames and has sound
+    spinvert-selftest.exe --share            uploading to the share server works over HTTPS
 """
 
 import sys
@@ -34,7 +35,28 @@ def player(path: str) -> int:
     return 0 if frames else 1
 
 
+def share_check() -> int:
+    """Upload a tiny picture to the share server over HTTPS, then delete it."""
+    import io
+    import urllib.request
+
+    from PIL import Image
+
+    from spinvert import share
+
+    share.remember = lambda result: None  # not in the real history
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8), (124, 92, 255)).save(buf, "PNG")
+    result = share.upload(buf.getvalue(), share.DEFAULT_SERVER)
+    urllib.request.urlopen(urllib.request.Request(result["delete"], method="POST",
+                                                  headers={"User-Agent": "Spinvert-selftest"}), timeout=30)
+    print(f"share: uploaded and deleted {result['url']}")
+    return 0
+
+
 if __name__ == "__main__":
+    if "--share" in sys.argv:
+        raise SystemExit(share_check())
     if "--player" in sys.argv:
         raise SystemExit(player(sys.argv[sys.argv.index("--player") + 1]))
     import smoke_test

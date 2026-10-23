@@ -15,7 +15,7 @@ from spinvert import __version__
 from spinvert.util import app_data_dir
 
 # The public server run for everyone who uses Spinvert; Settings can name another.
-DEFAULT_SERVER = ""
+DEFAULT_SERVER = "https://spinvert-share.spinvert-share.workers.dev"
 
 
 class ShareError(Exception):

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "spinvert"
-version = "0.2.1"
+version = "0.3.0"
 description = "Drag a file, hold a key, drop it on a format. Offline file converter for Windows."
 readme = "README.md"
 license = "MIT"

@@ -126,6 +126,7 @@ def selftest(out: Path) -> None:
     subprocess.run([str(exe), str(work)], check=True)
     video = next(work.rglob("clip.mp4"))
     subprocess.run([str(exe), "--player", str(video)], check=True)
+    subprocess.run([str(exe), "--share"], check=True)
 
 
 def inno() -> Path:

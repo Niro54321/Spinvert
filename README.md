@@ -5,7 +5,7 @@ Fast, offline file conversion for Windows, right where your files already are.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Platform: Windows 10 | 11](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6)
-[![Version: 0.2.1](https://img.shields.io/badge/version-0.2.1-7C5CFF)](https://github.com/Niro54321/Spinvert/releases/latest)
+[![Version: 0.3.0](https://img.shields.io/badge/version-0.3.0-7C5CFF)](https://github.com/Niro54321/Spinvert/releases/latest)
 ![Offline: 100%](https://img.shields.io/badge/uploads-none-success)
 
 ---
@@ -118,7 +118,7 @@ Ideas added on top of the original, from what users of file converters ask for:
 
 ## Install
 
-**[Download Spinvert-Setup-0.2.1.exe](https://github.com/Niro54321/Spinvert/releases/latest)**
+**[Download Spinvert-Setup-0.3.0.exe](https://github.com/Niro54321/Spinvert/releases/latest)**
 from the latest release and run it. Nothing else to install: Python and every
 library are inside. It installs for your Windows account only, so it needs no
 admin rights, and it can download **FFmpeg** (for audio and video) for you.
